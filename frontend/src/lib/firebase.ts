@@ -22,10 +22,10 @@ const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: "select_account" });
 
 const defaultFirebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "mindmirror-dev.firebaseapp.com",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "mindmirror-ideathon",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:1234567890:web:abcdef123456",
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyAskYJQKnqn5rZ6WGoTzcjUffEaeNU7GrY",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "mindmirror-app-bae2d.firebaseapp.com",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "mindmirror-app-bae2d",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:92992583743:web:e237cc1be19ec844cc608a",
 };
 
 export async function initFirebaseClient(): Promise<{ auth: Auth; db: Firestore }> {
@@ -52,25 +52,33 @@ export async function initFirebaseClient(): Promise<{ auth: Auth; db: Firestore 
     // Local dev mode fallback
   }
 
-  if (!getApps().length) {
-    app = initializeApp(config);
-  } else {
-    app = getApp();
+  try {
+    if (!getApps().length) {
+      app = initializeApp(config);
+    } else {
+      app = getApp();
+    }
+    auth = getAuth(app);
+    db = getFirestore(app);
+  } catch (err) {
+    console.warn("Dynamic Firebase client initialization error:", err);
   }
-
-  auth = getAuth(app);
-  db = getFirestore(app);
 
   return { auth, db };
 }
 
-// Initial eager initialization with defaults
-if (!getApps().length) {
-  app = initializeApp(defaultFirebaseConfig);
-} else {
-  app = getApp();
+// Initial eager initialization with defensive fallback
+try {
+  if (!getApps().length) {
+    app = initializeApp(defaultFirebaseConfig);
+  } else {
+    app = getApp();
+  }
+  auth = getAuth(app);
+  db = getFirestore(app);
+} catch (err) {
+  console.warn("Eager Firebase initialization deferred to runtime:", err);
 }
-auth = getAuth(app);
-db = getFirestore(app);
 
 export { app, auth, db, googleProvider };
+

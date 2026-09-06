@@ -99,10 +99,14 @@ if os.path.exists(dist_dir):
     async def serve_spa(full_path: str):
         if full_path.startswith("api"):
             return JSONResponse(status_code=404, content={"error": "API route not found"})
+        requested_file = os.path.join(dist_dir, full_path)
+        if full_path and os.path.isfile(requested_file):
+            return FileResponse(requested_file)
         index_file = os.path.join(dist_dir, "index.html")
         if os.path.exists(index_file):
             return FileResponse(index_file)
         return JSONResponse(status_code=404, content={"error": "Frontend build not found"})
+
 
 if __name__ == "__main__":
     import uvicorn

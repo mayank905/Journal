@@ -51,31 +51,43 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     }
 
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser: FirebaseUser | null) => {
-      if (firebaseUser) {
-        try {
-          const tokenResult = await firebaseUser.getIdTokenResult();
-          const isAdmin = Boolean(tokenResult.claims.admin || tokenResult.claims.role === "admin" || tokenResult.claims.role === "super_admin");
-          const role = (tokenResult.claims.role as string) || (isAdmin ? "admin" : "user");
-          setUser({
-            uid: firebaseUser.uid,
-            email: firebaseUser.email,
-            displayName: firebaseUser.displayName || (firebaseUser.email ? firebaseUser.email.split("@")[0] : "Journaler"),
-            photoURL: firebaseUser.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${firebaseUser.uid}`,
-            role,
-            isAdmin,
-          });
-          setIdToken(tokenResult.token);
-        } catch (err: any) {
-          console.error("Error retrieving Firebase token:", err);
-          setError(err.message || "Failed to retrieve session token.");
-        }
-      } else {
-        setUser(null);
-        setIdToken(null);
-      }
+    if (!auth) {
+      console.warn("Firebase Auth not yet initialized; deferring listener.");
       setLoading(false);
-    });
+      return;
+    }
+
+    let unsubscribe = () => {};
+    try {
+      unsubscribe = onAuthStateChanged(auth, async (firebaseUser: FirebaseUser | null) => {
+        if (firebaseUser) {
+          try {
+            const tokenResult = await firebaseUser.getIdTokenResult();
+            const isAdmin = Boolean(tokenResult.claims.admin || tokenResult.claims.role === "admin" || tokenResult.claims.role === "super_admin");
+            const role = (tokenResult.claims.role as string) || (isAdmin ? "admin" : "user");
+            setUser({
+              uid: firebaseUser.uid,
+              email: firebaseUser.email,
+              displayName: firebaseUser.displayName || (firebaseUser.email ? firebaseUser.email.split("@")[0] : "Journaler"),
+              photoURL: firebaseUser.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${firebaseUser.uid}`,
+              role,
+              isAdmin,
+            });
+            setIdToken(tokenResult.token);
+          } catch (err: any) {
+            console.error("Error retrieving Firebase token:", err);
+            setError(err.message || "Failed to retrieve session token.");
+          }
+        } else {
+          setUser(null);
+          setIdToken(null);
+        }
+        setLoading(false);
+      });
+    } catch (err) {
+      console.warn("Failed to subscribe to auth state:", err);
+      setLoading(false);
+    }
 
     return () => unsubscribe();
   }, []);
@@ -83,8 +95,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const signInWithGoogle = async () => {
     setError(null);
     setLoading(true);
+    if (!auth) {
+      setError("Authentication service is initializing. Please try again.");
+      setLoading(false);
+      return;
+    }
     try {
       const result = await signInWithPopup(auth, googleProvider);
+
       const tokenResult = await result.user.getIdTokenResult();
       const isAdmin = Boolean(tokenResult.claims.admin || tokenResult.claims.role === "admin" || tokenResult.claims.role === "super_admin");
       const role = (tokenResult.claims.role as string) || (isAdmin ? "admin" : "user");

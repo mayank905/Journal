@@ -4,11 +4,18 @@
 FROM node:20-slim AS frontend-builder
 WORKDIR /app/frontend
 
+ENV VITE_FIREBASE_API_KEY="AIzaSyAskYJQKnqn5rZ6WGoTzcjUffEaeNU7GrY" \
+    VITE_FIREBASE_AUTH_DOMAIN="mindmirror-app-bae2d.firebaseapp.com" \
+    VITE_FIREBASE_PROJECT_ID="mindmirror-app-bae2d" \
+    VITE_FIREBASE_APP_ID="1:92992583743:web:e237cc1be19ec844cc608a"
+
 COPY frontend/package*.json ./
+
 RUN npm ci
 
 COPY frontend/ ./
 RUN npm run build
+
 
 # Stage 2: Production Python 3.11 Runtime
 FROM python:3.11-slim AS runtime
