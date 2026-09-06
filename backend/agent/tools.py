@@ -1,18 +1,26 @@
 import logging
 import re
+import json
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Callable
 from pydantic import BaseModel, Field, field_validator
+
 from backend.services.entry_service import entry_service
+from backend.agent.fallback import gemini_manager, generate_content_with_fallback
 
 logger = logging.getLogger("mindmirror.agent.tools")
 
+# -----------------------------------------------------------------------------
 # 1. Pydantic Parameter Schemas for Server-Side Tools
+# -----------------------------------------------------------------------------
 
 class SearchJournalMemoryParams(BaseModel):
     query: str = Field(description="Search keywords, emotional triggers, or themes to find in past reflections.")
     mood: Optional[str] = Field(default=None, description="Optional emotional mood to filter by (e.g., Anxious, Grateful, Calm).")
     tags: Optional[List[str]] = Field(default=None, description="Optional list of tags to filter by.")
     time_window: Optional[str] = Field(default="all", description="Time window for search ('recent', 'month', 'year', 'all').")
+    exclude_id: Optional[str] = Field(default=None, description="Optional ID of current reflection to exclude from past search.")
+    exclude_title: Optional[str] = Field(default=None, description="Optional Title of current reflection to exclude from past search.")
 
 class AnalyzeCognitiveFramingParams(BaseModel):
     entry_text: str = Field(description="The journal reflection text to inspect for cognitive distortions.")
@@ -42,7 +50,7 @@ class ResolveLocationParams(BaseModel):
             raise ValueError(f"Latitude must be between -90 and 90, got {lat}")
         if lng is not None and not (-180 <= lng <= 180):
             raise ValueError(f"Longitude must be between -180 and 180, got {lng}")
-        # Truncate to 4 decimal places for geo-spatial privacy (~11m)
+        # Truncate to 4 decimal places for geo-spatial privacy (~11m resolution)
         return {
             "lat": round(lat, 4) if lat is not None else 0.0,
             "lng": round(lng, 4) if lng is not None else 0.0,
@@ -51,35 +59,177 @@ class ResolveLocationParams(BaseModel):
 class GeneratePromptsParams(BaseModel):
     mood: str = Field(default="Reflective", description="Current emotional state of the user.")
     recent_themes: Optional[List[str]] = Field(default=None, description="Themes or topics from recent reflections.")
+    content: Optional[str] = Field(default=None, description="Current reflection content draft.")
+    mode: Optional[str] = Field(default="socratic", description="Active cognitive persona mode.")
 
-# 2. Tool Implementations
+
+# -----------------------------------------------------------------------------
+# 2. Resilient LLM JSON Execution Helper
+# -----------------------------------------------------------------------------
+
+def _invoke_gemini_json(prompt: str, system_instruction: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Executes a structured JSON prompt against the Gemini fallback ladder.
+    Returns parsed dictionary on success, or None on failure to trigger heuristic fallback.
+    """
+    client = gemini_manager.get_client()
+    if not client:
+        return None
+
+    def _call(model_name: str) -> str:
+        config: Dict[str, Any] = {
+            "response_mime_type": "application/json",
+            "temperature": 0.3,
+        }
+        if system_instruction:
+            config["system_instruction"] = system_instruction
+
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=config,
+        )
+        return response.text
+
+    try:
+        raw_text, successful_model = generate_content_with_fallback(_call)
+        if not raw_text:
+            return None
+        cleaned = raw_text.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            logger.info(f"LLM tool generation succeeded via model: {successful_model}")
+            return parsed
+        return None
+    except Exception as exc:
+        logger.warning(f"Dynamic LLM tool execution failed, using heuristic fallback: {exc}")
+        return None
+
+
+# -----------------------------------------------------------------------------
+# 3. Tool Implementations (Hybrid LLM Primary with Deterministic Fallbacks)
+# -----------------------------------------------------------------------------
+
+MEMORY_STOP_WORDS = {
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are",
+    "aren't", "as", "at", "be", "because", "been", "before", "being", "below", "between", "both",
+    "but", "by", "can", "can't", "cannot", "could", "couldn't", "did", "didn't", "do", "does",
+    "doesn't", "doing", "don't", "down", "during", "each", "feel", "feeling", "feels", "felt",
+    "few", "for", "from", "further", "had", "hadn't", "has", "hasn't", "have", "haven't", "having",
+    "he", "he'd", "he'll", "he's", "her", "here", "here's", "hers", "herself", "him", "himself",
+    "his", "how", "how's", "i", "i'd", "i'll", "i'm", "i've", "if", "in", "into", "is", "isn't",
+    "it", "it's", "its", "itself", "let's", "me", "more", "most", "mustn't", "my", "myself",
+    "no", "nor", "not", "of", "off", "on", "once", "only", "or", "other", "ought", "our", "ours",
+    "ourselves", "out", "over", "own", "past", "pattern", "patterns", "reflection", "reflections",
+    "remember", "same", "shan't", "she", "she'd", "she'll", "she's", "should", "shouldn't", "so",
+    "some", "such", "than", "that", "that's", "the", "their", "theirs", "them", "themselves", "then",
+    "there", "there's", "these", "they", "they'd", "they'll", "they're", "they've", "this", "those",
+    "through", "to", "too", "under", "until", "up", "very", "was", "wasn't", "we", "we'd", "we'll",
+    "we're", "we've", "were", "weren't", "what", "what's", "when", "when's", "where", "where's",
+    "which", "while", "who", "who's", "whom", "why", "why's", "with", "won't", "would", "wouldn't",
+    "you", "you'd", "you'll", "you're", "you've", "your", "yours", "yourself", "yourselves"
+}
 
 def execute_search_journal_memory(user_id: str, params: SearchJournalMemoryParams) -> Dict[str, Any]:
     """Autonomously queries user's past reflections in Firestore under /users/{userId}/entries."""
     user_entries = entry_service.list_entries(user_id)
-    query_lower = params.query.lower()
+    raw_query = params.query or ""
+    query_lower = raw_query.lower()
     matches = []
 
-    for entry in user_entries:
-        score = 0
-        text_corpus = f"{entry.title} {entry.content} {' '.join(entry.tags)}".lower()
-        if query_lower in text_corpus:
-            score += 2
-        for word in query_lower.split():
-            if len(word) > 2 and word in text_corpus:
-                score += 1
+    # Extract non-stop word keywords from query
+    query_tokens = [w for w in re.findall(r'\b[a-zA-Z]{3,}\b', query_lower) if w not in MEMORY_STOP_WORDS]
 
-        if params.mood and entry.mood.lower() == params.mood.lower():
-            score += 2
+    # Calculate cutoff time for time_window filtering
+    now = datetime.now(timezone.utc)
+    cutoff: Optional[datetime] = None
+    if params.time_window == "recent":
+        cutoff = now - timedelta(days=7)
+    elif params.time_window == "month":
+        cutoff = now - timedelta(days=30)
+    elif params.time_window == "year":
+        cutoff = now - timedelta(days=365)
+
+    filter_tags = [t.lower().lstrip("#") for t in (params.tags or []) if t]
+
+    for entry in user_entries:
+        # 1. Strictly exclude the current reflection if specified
+        if params.exclude_id and str(entry.id) == str(params.exclude_id):
+            continue
+        if params.exclude_title and entry.title and entry.title.strip().lower() == params.exclude_title.strip().lower():
+            continue
+
+        # 2. Check time window filter if applicable
+        raw_created = getattr(entry, "createdAt", None) or getattr(entry, "created_at", None)
+        if cutoff and raw_created:
+            try:
+                if isinstance(raw_created, str):
+                    dt_str = raw_created.replace("Z", "+00:00")
+                    entry_dt = datetime.fromisoformat(dt_str)
+                    if entry_dt.tzinfo is None:
+                        entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+                    if entry_dt < cutoff:
+                        continue
+                elif isinstance(raw_created, datetime):
+                    entry_dt = raw_created if raw_created.tzinfo else raw_created.replace(tzinfo=timezone.utc)
+                    if entry_dt < cutoff:
+                        continue
+            except Exception:
+                pass
+
+        score = 0
+        entry_tags_lower = [t.lower().lstrip("#") for t in (entry.tags or [])]
+        entry_title_lower = (entry.title or "").lower()
+        entry_content_lower = (entry.content or "").lower()
+
+        # Score substantive keyword tokens
+        for token in query_tokens:
+            if token in entry_title_lower:
+                score += 4
+            if any(token in t for t in entry_tags_lower):
+                score += 3
+            if token in entry_content_lower:
+                score += 2
+
+        # Direct phrase match boost if query has substance
+        if len(query_tokens) > 0 and raw_query.strip().lower() in entry_content_lower:
+            score += 5
+
+        # Emotional mood correlation
+        if params.mood and entry.mood and entry.mood.lower() == params.mood.lower():
+            score += 4
+
+        # Tag overlap correlation
+        for req_tag in filter_tags:
+            if req_tag in entry_tags_lower:
+                score += 3
+
+        # Fallback baseline: If user asks a general pattern question with few keywords,
+        # surface recent historical entries with rich content so Gemini has grounding.
+        if score == 0 and not query_tokens and len(entry_content_lower) > 30:
+            score = 1
 
         if score > 0:
+            clean_content = (entry.content or "").strip()
+            snippet_text = clean_content[:300] + ("..." if len(clean_content) > 300 else "")
+            
+            # Extract clean date string (YYYY-MM-DD or readable)
+            date_str = "past reflection"
+            if raw_created:
+                date_str = str(raw_created).split("T")[0] if "T" in str(raw_created) else str(raw_created)
+
             matches.append({
                 "id": entry.id,
-                "title": entry.title,
-                "mood": entry.mood,
-                "tags": entry.tags,
-                "created_at": entry.createdAt if hasattr(entry, "createdAt") else entry.created_at,
-                "snippet": entry.content[:160] + "..." if len(entry.content) > 160 else entry.content,
+                "title": entry.title or "Untitled Reflection",
+                "mood": entry.mood or "Reflective",
+                "tags": entry.tags or [],
+                "created_at": raw_created,
+                "date": date_str,
+                "snippet": snippet_text,
+                "excerpt": snippet_text,
                 "score": score,
             })
 
@@ -91,19 +241,55 @@ def execute_search_journal_memory(user_id: str, params: SearchJournalMemoryParam
         "results": matches[:5],
     }
 
+
 def execute_analyze_cognitive_framing(user_id: str, params: AnalyzeCognitiveFramingParams) -> Dict[str, Any]:
     """Detects cognitive distortions and provides empowering alternative lenses."""
+    # 1. Dynamic LLM Execution Attempt
+    llm_prompt = f"""
+    Analyze the following personal journal reflection text for cognitive distortions (such as Catastrophizing, All-or-Nothing Thinking, Emotional Reasoning, 'Should' Statements, Overgeneralization, Mental Filter, or Mind Reading).
+    Reflective mode: {params.mode}
+    Journal text:
+    \"\"\"{params.entry_text}\"\"\"
+
+    Respond with a strict JSON object with this exact structure:
+    {{
+      "analysis_mode": "{params.mode}",
+      "patterns_detected": <number of distortions found, 0 if healthy reflection>,
+      "insights": [
+        {{
+          "distortion": "<Name of Distortion, or 'Grounded Self-Reflection' if none>",
+          "evidence": "<Specific quote or thematic evidence from text>",
+          "empowering_reframe": "<Empathetic, constructive alternative lens>"
+        }}
+      ]
+    }}
+    """
+    system_inst = "You are MindMirror's Cognitive Clarity expert. Evaluate psychological distortions and provide compassionate, grounded reframing in strict JSON."
+    llm_result = _invoke_gemini_json(llm_prompt, system_inst)
+
+    if (
+        llm_result 
+        and isinstance(llm_result.get("insights"), list) 
+        and len(llm_result["insights"]) > 0
+    ):
+        return {
+            "analysis_mode": params.mode,
+            "patterns_detected": llm_result.get("patterns_detected", len(llm_result["insights"])),
+            "insights": llm_result["insights"],
+        }
+
+    # 2. Resilient Deterministic Heuristic Fallback
     text = params.entry_text.lower()
     detected_patterns = []
 
-    if any(w in text for w in ["always", "never", "ruined", "completely", "impossible", "hopeless"]):
+    if any(w in text for w in ["always", "never", "ruined", "completely", "impossible", "hopeless", "disaster"]):
         detected_patterns.append({
             "distortion": "All-or-Nothing Thinking / Catastrophizing",
             "evidence": "Use of absolute terms ('always', 'never', 'ruined')",
             "empowering_reframe": "Things rarely exist in absolutes. What is one nuance or middle-ground reality you can acknowledge?",
         })
 
-    if any(w in text for w in ["feel like a failure", "feels like nobody", "feel stupid", "i feel that it's over"]):
+    if any(w in text for w in ["feel like a failure", "feels like nobody", "feel stupid", "i feel that it's over", "worthless"]):
         detected_patterns.append({
             "distortion": "Emotional Reasoning",
             "evidence": "Treating transient emotions as objective external facts",
@@ -115,6 +301,13 @@ def execute_analyze_cognitive_framing(user_id: str, params: AnalyzeCognitiveFram
             "distortion": "'Should' Statements",
             "evidence": "Rigid expectations generating unneeded guilt or pressure",
             "empowering_reframe": "Can you replace 'I should' with 'I choose to' or 'It would be helpful if'?",
+        })
+
+    if any(w in text for w in ["everyone", "everybody", "nobody", "nothing ever", "every time"]):
+        detected_patterns.append({
+            "distortion": "Overgeneralization",
+            "evidence": "Broad generalizations extending a single moment into an enduring universal truth",
+            "empowering_reframe": "When we notice overgeneralization, we can ask: what is one notable exception to this rule?",
         })
 
     if not detected_patterns:
@@ -130,12 +323,50 @@ def execute_analyze_cognitive_framing(user_id: str, params: AnalyzeCognitiveFram
         "insights": detected_patterns,
     }
 
+
 def execute_synthesize_entry(user_id: str, params: SynthesizeEntryParams) -> Dict[str, Any]:
-    """Generates an empathetic 2-sentence executive summary, 3 takeaways, and a 3-6 word evocative title."""
+    """Generates an empathetic executive summary, 3 takeaways, and a 3-6 word evocative title."""
     text = params.entry_text.strip()
     words = text.split()
-    
-    # Generate clean 3-6 word evocative title
+    word_count = len(words)
+
+    # 1. Dynamic LLM Execution Attempt
+    llm_prompt = f"""
+    Synthesize this personal journal reflection into a compassionate executive summary, 3 tailored takeaways, and an evocative 3-6 word title.
+    Journal text:
+    \"\"\"{text}\"\"\"
+
+    Respond with a strict JSON object with this exact structure:
+    {{
+      "word_count": {word_count},
+      "suggested_title": "<Evocative 3 to 6 word title>",
+      "summary": "<Empathetic 2-sentence executive summary>",
+      "executive_summary": "<Same empathetic 2-sentence summary>",
+      "takeaways": [
+        "<Takeaway 1 tailored directly to entry>",
+        "<Takeaway 2 tailored directly to entry>",
+        "<Takeaway 3 tailored directly to entry>"
+      ]
+    }}
+    """
+    system_inst = "You are MindMirror's reflection synthesis engine. Distill deeply personal thoughts into poetic, psychologically grounding clarity in strict JSON."
+    llm_result = _invoke_gemini_json(llm_prompt, system_inst)
+
+    if (
+        llm_result 
+        and isinstance(llm_result.get("takeaways"), list) 
+        and len(llm_result["takeaways"]) >= 3
+        and llm_result.get("suggested_title")
+    ):
+        return {
+            "word_count": word_count,
+            "suggested_title": llm_result.get("suggested_title"),
+            "summary": llm_result.get("summary") or llm_result.get("executive_summary", ""),
+            "executive_summary": llm_result.get("executive_summary") or llm_result.get("summary", ""),
+            "takeaways": llm_result.get("takeaways")[:3],
+        }
+
+    # 2. Resilient Deterministic Heuristic Fallback
     if words:
         candidate_words = [w.strip(".,!?;:\"'()[]{}") for w in words[:6] if len(w) > 2]
         title_body = " ".join(candidate_words[:4]).title() if candidate_words else "Quiet Reflection"
@@ -143,11 +374,11 @@ def execute_synthesize_entry(user_id: str, params: SynthesizeEntryParams) -> Dic
     else:
         suggested_title = "Unspoken Inner Landscape"
 
-    summary = text[:220] + ("..." if len(text) > 220 else "")
-    exec_summary = f"This reflection delves honestly into your current personal thoughts and internal states. {summary}"
+    summary_snippet = text[:220] + ("..." if len(text) > 220 else "")
+    exec_summary = f"This reflection delves honestly into your current personal thoughts and internal states. {summary_snippet}"
 
     return {
-        "word_count": len(words),
+        "word_count": word_count,
         "suggested_title": suggested_title,
         "summary": exec_summary,
         "executive_summary": exec_summary,
@@ -161,16 +392,60 @@ def execute_synthesize_entry(user_id: str, params: SynthesizeEntryParams) -> Dic
 
 def execute_generate_actionable_milestones(user_id: str, params: GenerateMilestonesParams) -> Dict[str, Any]:
     """Converts realizations into 24h micro-actions, short-term milestones, and mindset shifts."""
+    insights_text = params.insights.strip()
+
+    # 1. Dynamic LLM Execution Attempt
+    llm_prompt = f"""
+    Convert the following journal breakthrough insights into immediate, bounded, actionable momentum:
+    Insights: \"\"\"{insights_text}\"\"\"
+
+    Respond with a strict JSON object with this exact structure:
+    {{
+      "immediate_24h_action": "<A friction-free micro-step executable within 24 hours>",
+      "short_term_milestone": "<A realistic milestone for the next 48 to 72 hours>",
+      "mindset_shift": "<A grounded reframing phrase replacing judgment with curiosity>"
+    }}
+    """
+    system_inst = "You are MindMirror's Action Momentum Strategist. Translate emotional processing into empowering, practical micro-steps in strict JSON."
+    llm_result = _invoke_gemini_json(llm_prompt, system_inst)
+
+    if (
+        llm_result 
+        and llm_result.get("immediate_24h_action") 
+        and llm_result.get("short_term_milestone") 
+        and llm_result.get("mindset_shift")
+    ):
+        return {
+            "immediate_24h_action": llm_result["immediate_24h_action"],
+            "short_term_milestone": llm_result["short_term_milestone"],
+            "mindset_shift": llm_result["mindset_shift"],
+        }
+
+    # 2. Resilient Deterministic Heuristic Fallback
+    lower_insights = insights_text.lower()
+    if any(k in lower_insights for k in ["overwhelm", "busy", "stress", "pressure"]):
+        immediate_action = "Protect a 15-minute sanctuary block on your calendar today with zero obligations."
+        milestone = "Decline or renegotiate one non-essential commitment within 48 hours."
+        shift = "Rest is not a reward to be earned; it is the foundation of clear perspective."
+    elif any(k in lower_insights for k in ["goal", "focus", "plan", "start", "project"]):
+        immediate_action = "Complete the first 10-minute micro-slice of your goal before midday tomorrow."
+        milestone = "Establish a recurring daily check-in anchor for the next 3 days."
+        shift = "Consistent micro-steps always outpace sporadic bursts of perfectionism."
+    else:
+        immediate_action = "Dedicate 5 minutes of focused stillness to note your single most important priority."
+        milestone = "Follow through on one bounded micro-step directly related to this breakthrough within 48 hours."
+        shift = "Allow curiosity to replace judgment when navigating resistance or uncertainty."
+
     return {
-        "immediate_24h_action": "Dedicate 5 minutes of focused stillness to note your single most important priority.",
-        "short_term_milestone": "Follow through on one bounded micro-step directly related to this breakthrough within 48 hours.",
-        "mindset_shift": "Allow curiosity to replace judgment when navigating resistance or uncertainty.",
+        "immediate_24h_action": immediate_action,
+        "short_term_milestone": milestone,
+        "mindset_shift": shift,
     }
+
 
 def execute_resolve_and_anchor_location(user_id: str, params: ResolveLocationParams) -> Dict[str, Any]:
     """Server-side location validation with 4-decimal privacy boundary enforcement."""
     coords = params.coordinates or {"lat": 0.0, "lng": 0.0}
-    # Ensure 4-decimal precision (~11m resolution)
     sanitized_coords = {
         "lat": round(coords.get("lat", 0.0), 4),
         "lng": round(coords.get("lng", 0.0), 4),
@@ -181,47 +456,159 @@ def execute_resolve_and_anchor_location(user_id: str, params: ResolveLocationPar
         "privacy_guarantee": "Coordinates truncated to 4 decimal places (~11 meters). High-precision tracking EXIF removed.",
     }
 
+
 def execute_generate_inspirational_prompts(user_id: str, params: GeneratePromptsParams) -> Dict[str, Any]:
-    """Tailors prompt suggestions based on current emotional mood."""
+    """Tailors prompt suggestions dynamically via LLM based on mode, mood, and journal draft text."""
     mood = params.mood.capitalize()
-    prompts_map = {
-        "Calm": [
-            "What quiet realization brought you this sense of ease?",
-            "How can you anchor this peaceful presence into your week?",
-            "What boundary did you uphold that allowed this space?",
-            "What are you grateful not to be rushing through right now?",
+    recent_themes = params.recent_themes or []
+    content_snippet = (params.content or "").strip()
+    mode = (params.mode or "socratic").lower()
+
+    # 1. Dynamic LLM Execution Attempt (Content-Aware when draft has text)
+    if content_snippet and len(content_snippet) > 60:
+        llm_prompt = f"""
+    Analyze the following personal journal reflection draft and generate exactly 3 evocative, targeted reflective prompt questions for the user.
+    Cognitive Persona Lens: {mode}
+    Current Mood: {mood}
+    Journal Content Draft:
+    \"\"\"{content_snippet[:1500]}\"\"\"
+
+    Tailor the questions strictly according to the {mode} cognitive persona:
+    - If socratic: interrogate assumptions, hidden beliefs, and unspoken expectations in their writing.
+    - If action_momentum: identify 5-minute micro-actions, 24h steps, and removing friction based on what they wrote.
+    - If pattern_memory: connect this entry to recurring life patterns, triggers, or cycles.
+    - If cognitive_reframing: challenge cognitive distortions, offer self-compassion, and balanced perspective on their text.
+    - If guided_inquiry: offer progressive follow-up questions to explore in subsequent writing.
+
+    Respond with a strict JSON object with this exact structure:
+    {{
+      "mood": "{mood}",
+      "prompts": [
+        "<Question 1>",
+        "<Question 2>",
+        "<Question 3>"
+      ]
+    }}
+    """
+    else:
+        llm_prompt = f"""
+    Generate exactly 4 poignant, evocative, open-ended reflective journaling prompts for someone experiencing:
+    Current Mood: {mood}
+    Cognitive Persona Mode: {mode}
+    Recent Life Themes: {', '.join(recent_themes) if recent_themes else 'General introspection and personal growth'}
+
+    Respond with a strict JSON object with this exact structure:
+    {{
+      "mood": "{mood}",
+      "prompts": [
+        "<Prompt 1>",
+        "<Prompt 2>",
+        "<Prompt 3>",
+        "<Prompt 4>"
+      ]
+    }}
+    """
+    system_inst = "You are MindMirror's Guided Reflection Architect. Create penetrating, empathetic questions that unlock self-discovery in strict JSON."
+    llm_result = _invoke_gemini_json(llm_prompt, system_inst)
+
+    if (
+        llm_result 
+        and isinstance(llm_result.get("prompts"), list) 
+        and len(llm_result["prompts"]) >= 3
+    ):
+        return {
+            "mood": mood,
+            "prompts": llm_result["prompts"][:4],
+        }
+
+    # If content exists, provide mode-specific content-grounded heuristic fallback
+    if content_snippet and len(content_snippet) > 40:
+        first_clause = content_snippet.split('.')[0].strip()[:65]
+        if not first_clause:
+            first_clause = content_snippet[:65].strip()
+
+        mode_content_prompts = {
+            "socratic": [
+                f"When reflecting on '{first_clause}...', what unexamined assumption might you be making?",
+                f"What unspoken expectation or fear is quietly driving your reaction to this?",
+                f"If you stepped completely outside your ego, what core truth is surfacing here?",
+                f"Whose judgment or approval are you anticipating regarding '{first_clause}'?",
+            ],
+            "action_momentum": [
+                f"What is a friction-free 5-minute micro-action you can take regarding '{first_clause}'?",
+                f"What is the single highest-leverage step you can complete within the next 24 hours?",
+                f"Where can you set a firm boundary or remove friction around this today?",
+                f"What does minimum viable progress look like on this challenge before tonight?",
+            ],
+            "pattern_memory": [
+                f"Have you felt this way before in past entries when facing something like '{first_clause}'?",
+                f"What historical pattern or emotional cycle might be repeating around this situation?",
+                f"When you faced a similar challenge previously, what breakthrough helped you navigate it?",
+                f"What past lesson or personal strength have you forgotten to apply here?",
+            ],
+            "cognitive_reframing": [
+                f"In what way might you be viewing '{first_clause}' through an all-or-nothing or catastrophic lens?",
+                f"What would a compassionate, wise friend tell you about this situation right now?",
+                f"What is an alternative, more balanced interpretation of what you just wrote?",
+                f"What evidence contradicts your harsh inner critic in this reflection?",
+            ],
+            "guided_inquiry": [
+                f"If you could explore one deeper question about '{first_clause}', what would it be?",
+                f"What unexpressed emotion or realization needs a voice in your next journal entry?",
+                f"If you had complete trust in your path, what would your next step look like?",
+                f"What part of this experience feels unresolved or asking for more reflection?",
+            ],
+        }
+
+        selected_prompts = mode_content_prompts.get(mode, mode_content_prompts["socratic"])
+        return {
+            "mood": mood,
+            "prompts": selected_prompts,
+        }
+
+    # 2. Resilient Deterministic Heuristic Fallback keyed by cognitive mode
+    mode_fallback_prompts = {
+        "socratic": [
+            "What assumption am I making here without realizing it?",
+            "What expectation am I holding myself to right now?",
+            "If I step outside my ego, what is the core truth here?",
+            "What fear is quietly driving my reaction?",
         ],
-        "Anxious": [
-            "What is the story your mind is telling you, and what are the actual facts?",
-            "What is one physical sensation you notice right now without judging it?",
-            "What is within your control in the next 30 minutes, and what must you release?",
-            "If your best friend felt this anxiety, what reassuring truth would you tell them?",
+        "action_momentum": [
+            "What is a 5-minute micro-action I can take right now?",
+            "Break this challenge into 3 bounded, doable steps.",
+            "What friction can I remove in the next 10 minutes?",
+            "What does minimum viable progress look like today?",
         ],
-        "Grateful": [
-            "Who or what contributed unexpectedly to your well-being today?",
-            "What small, often-overlooked detail brought a sense of richness to your day?",
-            "How does expressing this gratitude shift your bodily energy?",
-            "How can you pay this feeling forward to someone else?",
+        "pattern_memory": [
+            "Have I felt this way before in past reflections?",
+            "What historical pattern is repeating here?",
+            "What breakthroughs helped me navigate this previously?",
+            "What recurring triggers appear around this emotion?",
         ],
-        "Motivated": [
-            "What vision is energizing you right now, and why does it matter so much?",
-            "What is the first, friction-free micro-step you can take in the next hour?",
-            "What obstacle might emerge, and how will your future self handle it?",
-            "How can you sustain this momentum without burning out?",
+        "cognitive_reframing": [
+            "Help me reframe this thought with gentle self-compassion.",
+            "Am I falling into all-or-nothing thinking right now?",
+            "What is an alternative, balanced interpretation?",
+            "What evidence contradicts my harsh inner critic?",
         ],
-    }
-    default_prompts = [
-        "What is occupying the center of your awareness right now?",
-        "What feeling or thought have you been postponing looking at?",
-        "If you could give your present self one compassionate permission, what would it be?",
-        "What pattern from yesterday would you like to gently evolve today?",
-    ]
-    return {
-        "mood": mood,
-        "prompts": prompts_map.get(mood, default_prompts),
+        "guided_inquiry": [
+            "Give me 3 follow-up journaling questions to explore.",
+            "What question am I avoiding asking myself today?",
+            "What unexpressed emotion needs a voice right now?",
+            "How does this moment shape the person I am becoming?",
+        ],
     }
 
-# 3. Extensible Server-Side Tool Registry
+    return {
+        "mood": mood,
+        "prompts": mode_fallback_prompts.get(mode, mode_fallback_prompts["socratic"]),
+    }
+
+
+# -----------------------------------------------------------------------------
+# 4. Extensible Server-Side Tool Registry
+# -----------------------------------------------------------------------------
 
 class ToolDefinition:
     def __init__(
@@ -325,7 +712,7 @@ tool_registry.register(ToolDefinition(
 
 tool_registry.register(ToolDefinition(
     name="tool_generate_inspirational_prompts",
-    description="Generates 4 custom prompts tailored to the user's emotional state and recent journaling themes.",
+    description="Generates custom prompts tailored dynamically to the user's emotional state and recent journaling themes.",
     param_schema=GeneratePromptsParams,
     executor=execute_generate_inspirational_prompts,
 ))

@@ -16,12 +16,15 @@ import {
   ShieldCheck,
   Search,
   Lightbulb,
-  RefreshCw
+  RefreshCw,
+  Trash2
 } from 'lucide-react';
 
 import { useAuth } from '../context/AuthContext';
 import { 
   PERSONA_CONFIGS, 
+  getRandomPromptsForMode,
+  getContentGroundedPromptsForMode,
   type AgentPersonaMode, 
   type AgentTraceStep, 
   type AgentChatMessage 
@@ -34,6 +37,7 @@ import {
 } from '../lib/agentApi';
 
 interface AgentChatProps {
+  entryId?: string;
   entryTitle: string;
   entryContent: string;
   entryMood: string;
@@ -44,10 +48,12 @@ interface AgentChatProps {
   onApplyTitle?: (titleToApply: string) => void;
   onSaveSynthesis?: (synthesis: EntrySynthesis) => void;
   onDialogueHistoryChange?: (history: AgentChatMessage[]) => void;
+  onDeleteMessage?: (deletedIds: string | string[]) => void;
   onClose?: () => void;
 }
 
 export const AgentChat: React.FC<AgentChatProps> = ({
+  entryId,
   entryTitle,
   entryContent,
   entryMood,
@@ -58,32 +64,57 @@ export const AgentChat: React.FC<AgentChatProps> = ({
   onApplyTitle,
   onSaveSynthesis,
   onDialogueHistoryChange,
+  onDeleteMessage,
   onClose,
 }) => {
   const { idToken } = useAuth();
+
+  const getInitialWelcomeMessage = (mode: AgentPersonaMode): AgentChatMessage => ({
+    id: 'welcome',
+    role: 'assistant',
+    content: PERSONA_CONFIGS[mode]?.welcomeMessage || "Hello. I am your autonomous cognitive reflection companion. How can I reflect with you today?",
+    mode: mode,
+    modelUsed: 'gemini-3.8-flash',
+    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+  });
 
   const [activeMode, setActiveMode] = useState<AgentPersonaMode>('socratic');
   const [messages, setMessages] = useState<AgentChatMessage[]>(() => {
     if (initialDialogueHistory && initialDialogueHistory.length > 0) {
       return initialDialogueHistory;
     }
-    return [
-      {
-        id: 'welcome',
-        role: 'assistant',
-        content: "Hello. I am your autonomous cognitive reflection companion. I can search past memories, detect cognitive framing traps, or formulate grounding follow-ups. How can I reflect with you today?",
-        mode: 'socratic',
-        modelUsed: 'gemini-3.8-flash',
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      }
-    ];
+    return [getInitialWelcomeMessage('socratic')];
   });
+
+  const handleModeSelect = (modeKey: AgentPersonaMode) => {
+    setActiveMode(modeKey);
+    // If dialogue is at welcome state, dynamically update intro for selected persona
+    setMessages((prev) => {
+      if (prev.length <= 1 && (prev.length === 0 || prev[0].id === 'welcome')) {
+        return [getInitialWelcomeMessage(modeKey)];
+      }
+      return prev;
+    });
+
+    // Immediately update prompts when switching mode:
+    // If entry is empty or low content, pick 3 random prompts from the 10 hardcoded pool for modeKey.
+    // If substantial entry text is present, immediately show content-grounded prompts for modeKey.
+    const trimmed = entryContent.trim();
+    const wordCount = trimmed ? trimmed.split(/\s+/).length : 0;
+    const isVeryLessContent = wordCount < 20 && trimmed.length < 100;
+
+    if (isVeryLessContent) {
+      setPromptChips(getRandomPromptsForMode(modeKey, 3));
+    } else {
+      setPromptChips(getContentGroundedPromptsForMode(modeKey, trimmed, 3));
+    }
+  };
 
   const [inputText, setInputText] = useState<string>('');
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [currentTraces, setCurrentTraces] = useState<AgentTraceStep[]>([]);
   const [showTracesMap, setShowTracesMap] = useState<Record<string, boolean>>({});
-  const [promptChips, setPromptChips] = useState<string[]>([]);
+  const [promptChips, setPromptChips] = useState<string[]>(() => getRandomPromptsForMode('socratic', 3));
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   // Executive Synthesis State
@@ -92,33 +123,116 @@ export const AgentChat: React.FC<AgentChatProps> = ({
   const [appliedTitle, setAppliedTitle] = useState<boolean>(false);
   const [insertedTakeaways, setInsertedTakeaways] = useState<boolean>(false);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const activePersona = PERSONA_CONFIGS[activeMode];
 
   // Notify parent of dialogue history updates
+  const lastEmittedHistoryRef = useRef<string>('');
   useEffect(() => {
-    onDialogueHistoryChange?.(messages);
+    const realMessages = messages.filter((m) => m.id !== 'welcome');
+    const serialized = JSON.stringify(realMessages.map((m) => ({ id: m.id, content: m.content })));
+    if (serialized !== lastEmittedHistoryRef.current) {
+      // Don't emit empty array on initial component mount before user interaction
+      if (lastEmittedHistoryRef.current === '' && realMessages.length === 0) {
+        lastEmittedHistoryRef.current = serialized;
+        return;
+      }
+      lastEmittedHistoryRef.current = serialized;
+      onDialogueHistoryChange?.(realMessages);
+    }
   }, [messages, onDialogueHistoryChange]);
 
-  // Scroll to bottom when messages or traces update
+  // Scroll ONLY the internal chat container when new messages arrive (never scroll the outer page/window)
+  const prevMessagesLengthRef = useRef(messages.length);
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, currentTraces]);
-
-  // Fetch prompt ideas when mode or mood changes
-  useEffect(() => {
-    let isMounted = true;
-    fetchPromptIdeas(entryMood, activeMode, idToken).then((prompts) => {
-      if (isMounted && prompts.length > 0) {
-        setPromptChips(prompts.slice(0, 3));
-      } else if (isMounted) {
-        setPromptChips(activePersona.quickPrompts);
+    if (messages.length > prevMessagesLengthRef.current || (isGenerating && currentTraces.length > 0)) {
+      if (messagesContainerRef.current) {
+        messagesContainerRef.current.scrollTo({
+          top: messagesContainerRef.current.scrollHeight,
+          behavior: 'smooth',
+        });
       }
-    });
+    }
+    prevMessagesLengthRef.current = messages.length;
+  }, [messages, currentTraces, isGenerating]);
+
+  // Suggested Prompts Management:
+  // 1. If entry content is zero or very low (< 20 words && < 100 chars):
+  //    Suggest 3 random prompts from the 10 hardcoded pool for activeMode.
+  // 2. As entry content increases:
+  //    Replace fixed prompts with dynamic prompts generated from the journal content + active mode.
+  // 3. If user deletes entry to zero or almost zero:
+  //    Immediately revert to 3 random hardcoded prompts from activeMode.
+  useEffect(() => {
+    const trimmed = entryContent.trim();
+    const wordCount = trimmed ? trimmed.split(/\s+/).length : 0;
+    const isVeryLessContent = wordCount < 20 && trimmed.length < 100;
+
+    if (isVeryLessContent) {
+      setPromptChips(getRandomPromptsForMode(activeMode, 3));
+      return;
+    }
+
+    // Immediately provide content-grounded mode-tailored prompts so user never sees a stale state
+    setPromptChips(getContentGroundedPromptsForMode(activeMode, trimmed, 3));
+
+    let isCancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const dynamicPrompts = await fetchPromptIdeas(
+          entryMood,
+          activeMode,
+          idToken,
+          trimmed,
+          entryTitle
+        );
+        if (!isCancelled && dynamicPrompts && dynamicPrompts.length > 0) {
+          setPromptChips(dynamicPrompts.slice(0, 3));
+        }
+      } catch (err) {
+        console.warn('Could not fetch content-aware prompt ideas:', err);
+      }
+    }, 600);
+
     return () => {
-      isMounted = false;
+      isCancelled = true;
+      clearTimeout(timer);
     };
-  }, [activeMode, entryMood, idToken, activePersona]);
+  }, [entryContent, activeMode, entryMood, entryTitle, idToken]);
+
+  // Paired turn deletion: deleting either user prompt or AI assistant response deletes the reciprocal conversational turn
+  const handleDeleteMessage = (messageId: string) => {
+    let deletedIds: string[] = [messageId];
+
+    setMessages((prev) => {
+      const targetIndex = prev.findIndex((m) => m.id === messageId);
+      if (targetIndex === -1) return prev;
+
+      const target = prev[targetIndex];
+      const idsToDelete = new Set<string>([messageId]);
+
+      if (target.role === 'assistant') {
+        // Find preceding user prompt in this conversational turn
+        if (targetIndex > 0 && prev[targetIndex - 1].role === 'user') {
+          idsToDelete.add(prev[targetIndex - 1].id);
+        }
+      } else if (target.role === 'user') {
+        // Find subsequent assistant reply in this conversational turn
+        if (targetIndex + 1 < prev.length && prev[targetIndex + 1].role === 'assistant') {
+          idsToDelete.add(prev[targetIndex + 1].id);
+        }
+      }
+
+      deletedIds = Array.from(idsToDelete);
+      const updated = prev.filter((m) => !idsToDelete.has(m.id));
+      if (updated.length === 0 || (updated.length === 1 && updated[0].id === 'welcome')) {
+        return [getInitialWelcomeMessage(activeMode)];
+      }
+      return updated;
+    });
+
+    onDeleteMessage?.(deletedIds);
+  };
 
   // Handle On-Demand Reflection Synthesis
   const handleTriggerSynthesis = async () => {
@@ -198,6 +312,7 @@ export const AgentChat: React.FC<AgentChatProps> = ({
       {
         message: textToSend,
         mode: activeMode,
+        entry_id: entryId,
         entry_title: entryTitle,
         entry_content: entryContent,
         entry_mood: entryMood,
@@ -393,30 +508,37 @@ export const AgentChat: React.FC<AgentChatProps> = ({
         </div>
       )}
 
-      {/* Persona Mode Switcher Tray */}
-      <div className="px-4 py-2.5 bg-slate-100/60 dark:bg-slate-900/60 border-b border-slate-200/80 dark:border-slate-800 overflow-x-auto flex items-center gap-1.5 scrollbar-none">
-        {(Object.keys(PERSONA_CONFIGS) as AgentPersonaMode[]).map((modeKey) => {
-          const cfg = PERSONA_CONFIGS[modeKey];
-          const isSelected = activeMode === modeKey;
-          return (
-            <button
-              key={modeKey}
-              onClick={() => setActiveMode(modeKey)}
-              className={`whitespace-nowrap inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium transition-all cursor-pointer ${
-                isSelected
-                  ? 'bg-indigo-600 text-white shadow-sm ring-1 ring-indigo-500'
-                  : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white border border-slate-200 dark:border-slate-700'
-              }`}
-            >
-              <span>{cfg.emoji}</span>
-              <span>{cfg.shortTitle}</span>
-            </button>
-          );
-        })}
+      {/* Persona Mode Switcher Tray - All 5 modes visible without horizontal scroll */}
+      <div className="px-4 py-2.5 bg-slate-100/70 dark:bg-slate-900/70 border-b border-slate-200/80 dark:border-slate-800">
+        <div className="text-[10px] uppercase font-bold text-slate-400 dark:text-slate-500 mb-1.5 flex items-center justify-between">
+          <span>Cognitive Modes ({Object.keys(PERSONA_CONFIGS).length} Active)</span>
+          <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-semibold">{activePersona.title}</span>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {(Object.keys(PERSONA_CONFIGS) as AgentPersonaMode[]).map((modeKey) => {
+            const cfg = PERSONA_CONFIGS[modeKey];
+            const isSelected = activeMode === modeKey;
+            return (
+              <button
+                key={modeKey}
+                onClick={() => handleModeSelect(modeKey)}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-all cursor-pointer ${
+                  isSelected
+                    ? 'bg-indigo-600 text-white shadow-sm ring-1 ring-indigo-500 font-semibold'
+                    : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-slate-750 border border-slate-200 dark:border-slate-700'
+                }`}
+                title={cfg.description}
+              >
+                <span>{cfg.emoji}</span>
+                <span>{cfg.shortTitle}</span>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* Messages Scroll Area */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.map((msg) => {
           // Check if memory was consulted in this turn's trace steps
           const hasMemoryConsulted = msg.traceSteps?.some(
@@ -498,12 +620,26 @@ export const AgentChat: React.FC<AgentChatProps> = ({
                   </div>
                 )}
 
-                {/* Action Buttons (Available once user starts chat with agent) */}
+                {/* Action Buttons for User Dialogue */}
+                {msg.role === 'user' && (
+                  <div className="mt-2 pt-1 border-t border-indigo-500/40 flex items-center justify-end">
+                    <button
+                      onClick={() => handleDeleteMessage(msg.id)}
+                      className="inline-flex items-center gap-1 text-[10px] text-indigo-100 hover:text-white transition-colors cursor-pointer"
+                      title="Delete this message"
+                    >
+                      <Trash2 className="h-2.5 w-2.5" />
+                      <span>Delete</span>
+                    </button>
+                  </div>
+                )}
+
+                {/* Action Buttons for Assistant (Available once user starts chat with agent) */}
                 {msg.role === 'assistant' && msg.id !== 'welcome' && (
                   <div className="mt-3 pt-2 flex items-center gap-2 text-[11px]">
                     <button
                       onClick={() => onInsertIntoJournal(msg.content)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600 font-medium transition-all active:scale-95"
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600 font-medium transition-all active:scale-95 cursor-pointer"
                     >
                       <FileText className="h-3 w-3 text-indigo-500" />
                       <span>Insert into Journal</span>
@@ -511,7 +647,7 @@ export const AgentChat: React.FC<AgentChatProps> = ({
 
                     <button
                       onClick={() => handleCopyMessage(msg.id, msg.content)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600 font-medium transition-all active:scale-95"
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600 font-medium transition-all active:scale-95 cursor-pointer"
                     >
                       {copiedId === msg.id ? (
                         <>
@@ -524,6 +660,15 @@ export const AgentChat: React.FC<AgentChatProps> = ({
                           <span>Copy</span>
                         </>
                       )}
+                    </button>
+
+                    <button
+                      onClick={() => handleDeleteMessage(msg.id)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white dark:bg-slate-700 hover:bg-rose-50 dark:hover:bg-rose-950/40 text-slate-600 hover:text-rose-600 dark:text-slate-300 dark:hover:text-rose-400 border border-slate-200 dark:border-slate-600 font-medium transition-all active:scale-95 cursor-pointer"
+                      title="Delete this message"
+                    >
+                      <Trash2 className="h-3 w-3 text-slate-400 hover:text-rose-500" />
+                      <span>Delete</span>
                     </button>
                   </div>
                 )}
@@ -548,8 +693,6 @@ export const AgentChat: React.FC<AgentChatProps> = ({
             ))}
           </div>
         )}
-
-        <div ref={messagesEndRef} />
       </div>
 
       {/* Suggested Prompt Chips & Inspiration Trigger */}
@@ -557,6 +700,23 @@ export const AgentChat: React.FC<AgentChatProps> = ({
         <span className="text-[10px] text-slate-400 mr-1 flex items-center gap-1 font-medium">
           <Lightbulb className="h-3 w-3 text-amber-500" />
           <span>Suggestions:</span>
+          <button
+            type="button"
+            onClick={() => {
+              const trimmed = entryContent.trim();
+              const wordCount = trimmed ? trimmed.split(/\s+/).length : 0;
+              const isVeryLessContent = wordCount < 20 && trimmed.length < 100;
+              if (isVeryLessContent) {
+                setPromptChips(getRandomPromptsForMode(activeMode, 3));
+              } else {
+                setPromptChips(getContentGroundedPromptsForMode(activeMode, trimmed, 3));
+              }
+            }}
+            className="p-0.5 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors cursor-pointer"
+            title="Roll new suggestions for this mode"
+          >
+            <RefreshCw className="h-2.5 w-2.5" />
+          </button>
         </span>
         {promptChips.map((chip, idx) => (
           <button

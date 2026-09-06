@@ -25,6 +25,34 @@ def _calculate_word_and_char_count(content: str) -> tuple[int, int]:
     chars = len(content)
     return words, chars
 
+def normalize_firestore_entry_dict(raw: Dict[str, Any], doc_id: Optional[str] = None) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    d = dict(raw)
+    if "id" not in d and doc_id:
+        d["id"] = doc_id
+    if "userId" in d and "user_id" not in d:
+        d["user_id"] = d.get("userId")
+    if "user_id" not in d and doc_id:
+        d["user_id"] = "user"
+    if "createdAt" in d and "created_at" not in d:
+        d["created_at"] = d.get("createdAt")
+    if "created_at" not in d:
+        d["created_at"] = _get_current_iso_time()
+    if "updatedAt" in d and "updated_at" not in d:
+        d["updated_at"] = d.get("updatedAt")
+    if "updated_at" not in d:
+        d["updated_at"] = d.get("created_at") or _get_current_iso_time()
+    if "isFavorite" in d and "is_favorite" not in d:
+        d["is_favorite"] = bool(d.get("isFavorite", False))
+    if "wordCount" in d and "word_count" not in d:
+        d["word_count"] = int(d.get("wordCount", 0))
+    if "charCount" in d and "char_count" not in d:
+        d["char_count"] = int(d.get("charCount", 0))
+    if "dialogueHistory" in d and "dialogue_history" not in d:
+        d["dialogue_history"] = d.get("dialogueHistory", [])
+    return recursive_sanitize(d)
+
 class EntryService:
     def __init__(self):
         self._firestore_db = None
@@ -99,26 +127,19 @@ class EntryService:
         if "content" in update_dict:
             new_content = update_dict["content"] or ""
             calc_words, calc_chars = _calculate_word_and_char_count(new_content)
-            if "word_count" not in update_dict:
-                update_dict["word_count"] = calc_words
-            if "char_count" not in update_dict:
-                update_dict["char_count"] = calc_chars
+            update_dict["word_count"] = calc_words
+            update_dict["char_count"] = calc_chars
 
-        update_dict["updated_at"] = update_in.updated_at or _get_current_iso_time()
+        update_dict["updated_at"] = _get_current_iso_time()
 
-        # Merge with existing
-        existing_data = existing.model_dump()
-        for k, v in update_dict.items():
-            if v is not None:
-                existing_data[k] = v
+        merged_data = existing.model_dump()
+        merged_data.update(update_dict)
+        sanitized_doc = recursive_sanitize(merged_data)
 
-        sanitized_doc = recursive_sanitize(existing_data)
-
-        # Update in Firestore if available
         if self._firestore_db:
             try:
                 doc_ref = self._firestore_db.collection("users").document(user_id).collection("entries").document(entry_id)
-                doc_ref.set(sanitized_doc, merge=True)
+                doc_ref.update(sanitized_doc)
             except Exception as e:
                 logger.warning(f"Firestore update failed ({e}); updating fallback store.")
 
@@ -136,7 +157,7 @@ class EntryService:
                 snapshot = doc_ref.get()
                 if snapshot.exists:
                     data = snapshot.to_dict()
-                    return JournalEntryResponse(**recursive_sanitize(data))
+                    return JournalEntryResponse(**normalize_firestore_entry_dict(data, entry_id))
             except Exception as e:
                 logger.warning(f"Firestore read error ({e}); querying fallback store.")
 
@@ -144,7 +165,7 @@ class EntryService:
         user_entries = _dev_memory_store.get(user_id, {})
         entry_data = user_entries.get(entry_id)
         if entry_data:
-            return JournalEntryResponse(**recursive_sanitize(entry_data))
+            return JournalEntryResponse(**normalize_firestore_entry_dict(entry_data, entry_id))
         return None
 
     def list_entries(self, user_id: str) -> List[JournalEntryResponse]:
@@ -153,19 +174,34 @@ class EntryService:
         if self._firestore_db:
             try:
                 entries_ref = self._firestore_db.collection("users").document(user_id).collection("entries")
-                docs = entries_ref.order_by("updated_at", direction="DESCENDING").stream()
+                docs = list(entries_ref.stream())
                 for doc in docs:
-                    results.append(JournalEntryResponse(**recursive_sanitize(doc.to_dict())))
+                    raw_dict = doc.to_dict()
+                    if not raw_dict:
+                        continue
+                    normalized = normalize_firestore_entry_dict(raw_dict, doc.id)
+                    try:
+                        results.append(JournalEntryResponse(**normalized))
+                    except Exception as parse_err:
+                        logger.warning(f"Error parsing entry {doc.id}: {parse_err}")
+                
+                results.sort(
+                    key=lambda x: str(getattr(x, "updated_at", "") or getattr(x, "created_at", "") or ""),
+                    reverse=True
+                )
                 return results
             except Exception as e:
                 logger.warning(f"Firestore list failed ({e}); falling back to in-memory store.")
 
         user_entries = _dev_memory_store.get(user_id, {})
-        for entry_data in user_entries.values():
-            results.append(JournalEntryResponse(**recursive_sanitize(entry_data)))
+        for eid, entry_data in user_entries.items():
+            results.append(JournalEntryResponse(**normalize_firestore_entry_dict(entry_data, eid)))
         
-        # Sort descending by updated_at
-        results.sort(key=lambda x: x.updated_at, reverse=True)
+        # Sort descending by updated_at or created_at
+        results.sort(
+            key=lambda x: str(getattr(x, "updated_at", "") or getattr(x, "created_at", "") or ""),
+            reverse=True
+        )
         return results
 
     def delete_entry(self, user_id: str, entry_id: str) -> bool:

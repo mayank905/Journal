@@ -125,8 +125,88 @@ def test_agent_endpoints():
     assert "event: done" in stream_content
     print("PASS: /api/agent/stream produced valid SSE stream with traces and tokens")
 
+def test_dynamic_and_fallback_tool_execution():
+    from backend.agent import tools
+
+    # 1. Verify fallback coverage for all 8 canonical moods
+    canonical_moods = ["Calm", "Anxious", "Grateful", "Motivated", "Sad", "Angry", "Overwhelmed", "Hopeful"]
+    for mood in canonical_moods:
+        res = tool_registry.execute_tool(
+            "tool_generate_inspirational_prompts",
+            "test-user",
+            {"mood": mood}
+        )
+        assert res["mood"] == mood
+        assert len(res["prompts"]) >= 3, f"Expected prompts for mood {mood}"
+
+    # 2. Verify milestone structure (works dynamically or in fallback)
+    stress_res = tool_registry.execute_tool(
+        "tool_generate_actionable_milestones",
+        "test-user",
+        {"insights": "Feeling extreme work stress and constant overwhelm with deadlines."}
+    )
+    assert len(stress_res["immediate_24h_action"]) > 5
+    assert len(stress_res["short_term_milestone"]) > 5
+    assert len(stress_res["mindset_shift"]) > 5
+
+    # 3. Explicitly verify deterministic fallback when LLM is unavailable
+    original_invoke = tools._invoke_gemini_json
+    try:
+        tools._invoke_gemini_json = lambda *args, **kwargs: None
+        fallback_milestones = tool_registry.execute_tool(
+            "tool_generate_actionable_milestones",
+            "test-user",
+            {"insights": "Feeling extreme work stress and constant overwhelm with deadlines."}
+        )
+        assert "sanctuary" in fallback_milestones["immediate_24h_action"].lower()
+
+        fallback_prompts = tool_registry.execute_tool(
+            "tool_generate_inspirational_prompts",
+            "test-user",
+            {"mood": "Overwhelmed"}
+        )
+        assert len(fallback_prompts["prompts"]) == 4
+        assert "noise" in fallback_prompts["prompts"][1].lower() or "task" in fallback_prompts["prompts"][0].lower()
+    finally:
+        tools._invoke_gemini_json = original_invoke
+
+    # 4. Verify memory search with tags and time_window
+    mem_res = tool_registry.execute_tool(
+        "tool_search_journal_memory",
+        "test-user",
+        {"query": "reflection", "tags": ["#Work"], "time_window": "recent"}
+    )
+    assert "results" in mem_res
+    assert "total_past_entries" in mem_res
+
+    # 5. Verify simulated dynamic LLM JSON path
+    try:
+        tools._invoke_gemini_json = lambda prompt, system_instruction=None: {
+            "analysis_mode": "socratic",
+            "patterns_detected": 1,
+            "insights": [{
+                "distortion": "Fortune Telling",
+                "evidence": "Assuming the worst will happen tomorrow",
+                "empowering_reframe": "The future is unwritten; focus on what is true right now."
+            }]
+        }
+
+        dyn_res = tool_registry.execute_tool(
+            "tool_analyze_cognitive_framing",
+            "test-user",
+            {"entry_text": "Everything tomorrow will go wrong.", "mode": "socratic"}
+        )
+        assert dyn_res["patterns_detected"] == 1
+        assert dyn_res["insights"][0]["distortion"] == "Fortune Telling"
+    finally:
+        tools._invoke_gemini_json = original_invoke
+
+    print("PASS: test_dynamic_and_fallback_tool_execution passed for all 8 moods and dynamic paths")
+
 if __name__ == "__main__":
     test_tool_registry_and_parameter_validation()
     test_model_fallback_ladder()
     test_agent_endpoints()
+    test_dynamic_and_fallback_tool_execution()
     print("\nALL AUTOMATED TESTS FOR TICKET 03 PASSED SUCCESSFULLY!")
+

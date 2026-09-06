@@ -20,6 +20,8 @@ router = APIRouter(prefix="/api/agent", tags=["agent"])
 class PromptIdeasRequest(BaseModel):
     mood: str = Field(default="Reflective")
     mode: str = Field(default="socratic")
+    content: Optional[str] = Field(default=None)
+    title: Optional[str] = Field(default=None)
 
 class PromptIdeasResponse(BaseModel):
     mood: str
@@ -74,12 +76,16 @@ async def get_prompt_ideas(
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """
-    Generates mode- and mood-tailored prompt chips to inspire user writing.
+    Generates mode-, mood-, and content-tailored prompt chips to inspire user writing.
     """
     prompts_result = tool_registry.execute_tool(
         "tool_generate_inspirational_prompts",
         user.uid,
-        {"mood": request.mood}
+        {
+            "mood": request.mood,
+            "mode": request.mode,
+            "content": request.content,
+        }
     )
     return PromptIdeasResponse(
         mood=request.mood,

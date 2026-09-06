@@ -96,7 +96,24 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({ initialEntry, onEn
   const [synthesis, setSynthesis] = useState<EntrySynthesis | null>(null);
   const [locationModalOpen, setLocationModalOpen] = useState<boolean>(false);
 
+  // Auto-Save control state
+  const [autoSaveEnabled, setAutoSaveEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('mindmirror_autosave') !== 'false';
+    } catch {
+      return true;
+    }
+  });
 
+  const handleToggleAutoSave = () => {
+    setAutoSaveEnabled((prev) => {
+      const nextVal = !prev;
+      try {
+        localStorage.setItem('mindmirror_autosave', String(nextVal));
+      } catch {}
+      return nextVal;
+    });
+  };
 
   // Refs for auto-expanding textareas
   const titleTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -205,6 +222,7 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({ initialEntry, onEn
         wordCount: wordCount,
         charCount: charCount,
         location: location,
+        // Dialogue history and synthesis are always preserved for this reflection
         dialogueHistory: dialogueHistory,
         synthesis: synthesis,
         createdAt: createdAt,
@@ -219,7 +237,7 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({ initialEntry, onEn
         setLastSavedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
         setUpdatedAt(result.data?.updatedAt || new Date().toISOString());
 
-        // Confetti celebration if 50+ words upon save
+        // Confetti celebration if 50+ words upon manual save
         if (wordCount >= 50 && (!hasCelebratedMilestone || isManual)) {
           triggerConfettiCelebration();
         }
@@ -235,30 +253,30 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({ initialEntry, onEn
         setSaveError(result.error || 'Failed to persist reflection. Your writing is preserved locally.');
       }
     },
-    [user, entryId, title, content, mood, tags, isFavorite, wordCount, charCount, location, dialogueHistory, synthesis, createdAt, idToken, hasCelebratedMilestone, refreshEntriesList, onEntrySaved]
+    [user, entryId, title, content, mood, tags, isFavorite, wordCount, charCount, location, dialogueHistory, synthesis, createdAt, idToken, hasCelebratedMilestone, refreshEntriesList, onEntrySaved, initialEntry]
   );
 
 
-  // 15-Second Debounced Auto-Save
+  // 5-Second Debounced Auto-Save (only when autoSaveEnabled is true)
   useEffect(() => {
-    if (!isDirty) return;
+    if (!isDirty || !autoSaveEnabled) return;
 
     if (autoSaveTimerRef.current) {
       clearTimeout(autoSaveTimerRef.current);
     }
 
     autoSaveTimerRef.current = setTimeout(() => {
-      if (isDirty) {
+      if (isDirty && autoSaveEnabled) {
         performSave(false);
       }
-    }, 15000); // 15 seconds debounced
+    }, 5000); // 5 seconds debounced
 
     return () => {
       if (autoSaveTimerRef.current) {
         clearTimeout(autoSaveTimerRef.current);
       }
     };
-  }, [isDirty, performSave]);
+  }, [isDirty, autoSaveEnabled, performSave]);
 
   // Handle content changes
   const handleContentChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -390,33 +408,34 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({ initialEntry, onEn
     }
   };
 
-  const handleInsertFromAgent = (textToInsert: string) => {
+  const handleInsertFromAgent = useCallback((textToInsert: string) => {
     setContent((prev) => {
       const addition = `\n\n---\n> **🤖 Cognitive Agent Synthesis**:\n> ${textToInsert.split('\n').join('\n> ')}\n`;
       return prev ? `${prev}${addition}` : textToInsert;
     });
     setIsDirty(true);
     setSaveStatus('unsaved');
-  };
+  }, []);
 
-  const handleSaveLocation = (newLoc: EntryLocation | null) => {
+  const handleSaveLocation = useCallback((newLoc: EntryLocation | null) => {
     setLocation(newLoc);
     setIsDirty(true);
     setSaveStatus('unsaved');
-  };
+  }, []);
 
-  const handleApplyTitle = (newTitle: string) => {
+  const handleApplyTitle = useCallback((newTitle: string) => {
     setTitle(newTitle);
     setIsDirty(true);
     setSaveStatus('unsaved');
-  };
+  }, []);
 
-  const handleSaveSynthesis = (newSynthesis: EntrySynthesis) => {
+  const handleSaveSynthesis = useCallback((newSynthesis: EntrySynthesis) => {
     setSynthesis(newSynthesis);
     setIsDirty(true);
-  };
+  }, []);
 
-  const handleDialogueHistoryChange = (newHistory: any[]) => {
+  const handleDialogueHistoryChange = useCallback((newHistory: any[]) => {
+    if (!newHistory || newHistory.length === 0) return;
     const turns: EntryDialogueTurn[] = newHistory.map(m => ({
       id: m.id,
       role: m.role,
@@ -425,8 +444,14 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({ initialEntry, onEn
       timestamp: m.timestamp,
     }));
     setDialogueHistory(turns);
+  }, []);
+
+  const handleDeleteDialogueMessage = useCallback((deletedIds: string | string[]) => {
+    const idSet = new Set(Array.isArray(deletedIds) ? deletedIds : [deletedIds]);
+    setDialogueHistory(prev => prev.filter(t => !t.id || !idSet.has(t.id)));
     setIsDirty(true);
-  };
+    setSaveStatus('unsaved');
+  }, []);
 
   const handleDownloadMarkdown = () => {
     const currentEntry: JournalEntry = {
@@ -571,11 +596,27 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({ initialEntry, onEn
             )}
           </div>
 
+          {/* Single Auto-Save Toggle Button */}
+          <button
+            type="button"
+            onClick={handleToggleAutoSave}
+            className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+              autoSaveEnabled
+                ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 shadow-xs'
+                : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+            }`}
+            title={autoSaveEnabled ? "Auto-Save is ON. Continuous saving active." : "Auto-Save is OFF. Click to enable continuous saving."}
+          >
+            <span className={`h-2 w-2 rounded-full ${autoSaveEnabled ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`} />
+            <span>{autoSaveEnabled ? 'Auto-Save: ON' : 'Auto-Save: OFF'}</span>
+          </button>
+
           {/* Manual Save Button */}
           <button
             onClick={() => performSave(true)}
             disabled={saveStatus === 'saving'}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-900 dark:bg-white hover:bg-slate-800 dark:hover:bg-slate-100 text-white dark:text-slate-900 text-xs font-semibold shadow-sm transition-all active:scale-95 disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-900 dark:bg-white hover:bg-slate-800 dark:hover:bg-slate-100 text-white dark:text-slate-900 text-xs font-semibold shadow-sm transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
+            title="Manually save complete reflection, chat dialogue, and settings"
           >
             <Save className="h-4 w-4" />
             <span>Save</span>
@@ -874,18 +915,44 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({ initialEntry, onEn
           </div>
         </div>
 
-        {/* Footer Metrics & Debounce Notice */}
-        <div className="pt-4 flex flex-wrap items-center justify-between text-xs text-slate-400 gap-2">
-          <div className="flex items-center gap-2">
-            <span>Dual-tier persistence active:</span>
-            <span className="inline-flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-              15s auto-save debounced
-            </span>
+        {/* Status & Metrics Bar directly under Journal Entry Section */}
+        <div className="mt-4 pt-4 border-t border-slate-200/80 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-xs">
+            {saveStatus === 'saving' && (
+              <span className="inline-flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 font-medium animate-pulse">
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                <span>Saving reflection...</span>
+              </span>
+            )}
+            {saveStatus === 'saved' && (
+              <span className="inline-flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-medium">
+                <Check className="h-3.5 w-3.5" />
+                <span>Saved {lastSavedTime ? `at ${lastSavedTime}` : 'to Firestore'}</span>
+              </span>
+            )}
+            {saveStatus === 'unsaved' && (
+              <span className="inline-flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-medium">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                <span>Unsaved changes</span>
+              </span>
+            )}
+            {saveStatus === 'error' && (
+              <span className="inline-flex items-center gap-1.5 text-rose-600 dark:text-rose-400 font-medium">
+                <AlertCircle className="h-3.5 w-3.5" />
+                <span>Save error</span>
+              </span>
+            )}
           </div>
-          <div className="font-mono text-[11px]">
-            {wordCount} words • {charCount} chars • ~{Math.max(1, Math.ceil(wordCount / 200))} min read
+
+          {/* Right Metrics */}
+          <div className="flex items-center gap-3 text-xs text-slate-400 font-mono">
+            <span>{wordCount} words • {charCount} chars • ~{Math.max(1, Math.ceil(wordCount / 200))} min read</span>
           </div>
+        </div>
+
+        {/* Micro note explaining auto-save scope */}
+        <div className="pt-2 text-[11px] text-slate-400 dark:text-slate-500">
+          💡 <span className="font-semibold text-slate-500 dark:text-slate-400">Auto-Save Note</span>: When enabled, written reflection text, mood, and tags save continuously in the background. Chat dialogue and executive synthesis are saved when clicking <strong>Save</strong>.
         </div>
       </div>
     </div>
@@ -894,6 +961,8 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({ initialEntry, onEn
     {agentPanelOpen && (
       <div className="lg:col-span-5">
         <AgentChat
+          key={entryId}
+          entryId={entryId}
           entryTitle={title}
           entryContent={content}
           entryMood={mood}
@@ -904,6 +973,7 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({ initialEntry, onEn
           onApplyTitle={handleApplyTitle}
           onSaveSynthesis={handleSaveSynthesis}
           onDialogueHistoryChange={handleDialogueHistoryChange}
+          onDeleteMessage={handleDeleteDialogueMessage}
           onClose={() => setAgentPanelOpen(false)}
         />
       </div>
