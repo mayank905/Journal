@@ -5,9 +5,11 @@ import { LandingPage } from "./components/LandingPage";
 import { JournalEditor } from "./components/JournalEditor";
 import { HistoryArchive } from "./components/HistoryArchive";
 import { InsightsDashboard } from "./components/InsightsDashboard";
+import { AdminDashboard } from "./components/AdminDashboard";
 import { Shield, CheckCircle2 } from "lucide-react";
 import { subscribeToUserEntries } from "./lib/entriesApi";
 import type { JournalEntry } from "./types/entry";
+
 
 const MainContent: React.FC<{ darkMode: boolean; setDarkMode: React.Dispatch<React.SetStateAction<boolean>> }> = ({ darkMode, setDarkMode }) => {
   const { user, idToken, loading } = useAuth();
@@ -150,9 +152,14 @@ const MainContent: React.FC<{ darkMode: boolean; setDarkMode: React.Dispatch<Rea
                   onFilterByTag={handleFilterByTag}
                 />
               )}
+
+              {activeTab === 'admin' && (
+                <AdminDashboard />
+              )}
             </div>
           </div>
         )}
+
       </main>
 
       {/* Footer */}

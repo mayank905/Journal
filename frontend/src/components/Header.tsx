@@ -1,8 +1,8 @@
 import React from "react";
 import { useAuth } from "../context/AuthContext";
-import { Sparkles, LogOut, Moon, Sun, Edit3, BookOpen, TrendingUp } from "lucide-react";
+import { Sparkles, LogOut, Moon, Sun, Edit3, BookOpen, TrendingUp, ShieldCheck } from "lucide-react";
 
-export type ActiveTab = 'editor' | 'history' | 'insights';
+export type ActiveTab = 'editor' | 'history' | 'insights' | 'admin';
 
 interface HeaderProps {
   darkMode: boolean;
@@ -80,8 +80,23 @@ export const Header: React.FC<HeaderProps> = ({
               <span className="hidden sm:inline">Insights</span>
               <span className="sm:hidden">Trends</span>
             </button>
+            {user.isAdmin && (
+              <button
+                onClick={() => onTabChange('admin')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition-all ${
+                  activeTab === 'admin'
+                    ? 'bg-rose-600 text-white shadow-sm'
+                    : 'text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40'
+                }`}
+              >
+                <ShieldCheck className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Admin RBAC</span>
+                <span className="sm:hidden">Admin</span>
+              </button>
+            )}
           </nav>
         )}
+
 
         {/* Right Actions */}
         <div className="flex items-center gap-3">
@@ -105,13 +120,21 @@ export const Header: React.FC<HeaderProps> = ({
                   className="h-8 w-8 rounded-full ring-2 ring-indigo-500/20 object-cover bg-slate-100 dark:bg-slate-800"
                 />
                 <div className="hidden xl:block text-left leading-tight">
-                  <p className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate max-w-[140px]">
-                    {user.displayName}
-                  </p>
+                  <div className="flex items-center gap-1.5">
+                    <p className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate max-w-[120px]">
+                      {user.displayName}
+                    </p>
+                    {user.isAdmin && (
+                      <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-rose-100 dark:bg-rose-950/80 text-rose-700 dark:text-rose-300 border border-rose-300 dark:border-rose-800">
+                        {user.role || "Admin"}
+                      </span>
+                    )}
+                  </div>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate max-w-[140px]">
                     {user.email}
                   </p>
                 </div>
+
               </div>
 
               <button

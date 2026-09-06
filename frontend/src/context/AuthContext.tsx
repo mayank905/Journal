@@ -12,6 +12,8 @@ export interface AppUser {
   email: string | null;
   displayName: string | null;
   photoURL: string | null;
+  role?: string;
+  isAdmin?: boolean;
 }
 
 interface AuthContextType {
@@ -21,6 +23,7 @@ interface AuthContextType {
   error: string | null;
   signInWithGoogle: () => Promise<void>;
   signInDevMock: (customUid?: string) => void;
+  signInDevAdmin: () => void;
   signOut: () => Promise<void>;
   clearError: () => void;
 }
@@ -51,14 +54,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser: FirebaseUser | null) => {
       if (firebaseUser) {
         try {
-          const token = await firebaseUser.getIdToken();
+          const tokenResult = await firebaseUser.getIdTokenResult();
+          const isAdmin = Boolean(tokenResult.claims.admin || tokenResult.claims.role === "admin" || tokenResult.claims.role === "super_admin");
+          const role = (tokenResult.claims.role as string) || (isAdmin ? "admin" : "user");
           setUser({
             uid: firebaseUser.uid,
             email: firebaseUser.email,
             displayName: firebaseUser.displayName || (firebaseUser.email ? firebaseUser.email.split("@")[0] : "Journaler"),
             photoURL: firebaseUser.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${firebaseUser.uid}`,
+            role,
+            isAdmin,
           });
-          setIdToken(token);
+          setIdToken(tokenResult.token);
         } catch (err: any) {
           console.error("Error retrieving Firebase token:", err);
           setError(err.message || "Failed to retrieve session token.");
@@ -78,17 +85,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setLoading(true);
     try {
       const result = await signInWithPopup(auth, googleProvider);
-      const token = await result.user.getIdToken();
+      const tokenResult = await result.user.getIdTokenResult();
+      const isAdmin = Boolean(tokenResult.claims.admin || tokenResult.claims.role === "admin" || tokenResult.claims.role === "super_admin");
+      const role = (tokenResult.claims.role as string) || (isAdmin ? "admin" : "user");
       setUser({
         uid: result.user.uid,
         email: result.user.email,
         displayName: result.user.displayName || "Journaler",
         photoURL: result.user.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${result.user.uid}`,
+        role,
+        isAdmin,
       });
-      setIdToken(token);
+      setIdToken(tokenResult.token);
     } catch (err: any) {
       console.warn("Google sign-in popup error:", err);
-      // Helpful fallback message if Firebase credentials aren't initialized yet
       if (
         err.code === "auth/invalid-api-key" || 
         err.code?.includes("api-key-not-valid") ||
@@ -106,15 +116,35 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const signInDevMock = (customUid: string = "dev-explorer") => {
+    const isAdmin = customUid.includes("admin") || customUid === "dev-explorer";
+    const role = isAdmin ? (customUid.includes("root") ? "super_admin" : "admin") : "user";
     const mockUser: AppUser = {
       uid: customUid,
       email: `${customUid}@mindmirror.internal`,
-      displayName: "Architect Explorer",
+      displayName: isAdmin ? "Architect Explorer (Admin)" : "Architect Explorer",
       photoURL: `https://api.dicebear.com/7.x/bottts/svg?seed=${customUid}`,
+      role,
+      isAdmin,
     };
     setUser(mockUser);
     setIdToken(`dev-mock-token-${customUid}`);
     localStorage.setItem("mindmirror_dev_user", JSON.stringify(mockUser));
+    setError(null);
+    setLoading(false);
+  };
+
+  const signInDevAdmin = () => {
+    const adminUser: AppUser = {
+      uid: "admin-root",
+      email: "admin@mindmirror.internal",
+      displayName: "System Super Admin",
+      photoURL: "https://api.dicebear.com/7.x/bottts/svg?seed=admin-root",
+      role: "super_admin",
+      isAdmin: true,
+    };
+    setUser(adminUser);
+    setIdToken("dev-mock-token-admin-root");
+    localStorage.setItem("mindmirror_dev_user", JSON.stringify(adminUser));
     setError(null);
     setLoading(false);
   };
@@ -142,10 +172,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         error,
         signInWithGoogle,
         signInDevMock,
+        signInDevAdmin,
         signOut,
         clearError: () => setError(null),
       }}
     >
+
       {children}
     </AuthContext.Provider>
   );

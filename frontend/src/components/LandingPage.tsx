@@ -12,8 +12,9 @@ import {
 } from "lucide-react";
 
 export const LandingPage: React.FC = () => {
-  const { signInWithGoogle, signInDevMock, loading, error, clearError } = useAuth();
+  const { signInWithGoogle, signInDevMock, signInDevAdmin, loading, error, clearError } = useAuth();
   const [activeTab, setActiveTab] = useState<"socratic" | "action" | "pattern">("socratic");
+
 
   const previews = {
     socratic: {
@@ -109,7 +110,18 @@ export const LandingPage: React.FC = () => {
             <KeyRound className="h-4 w-4 text-indigo-500" />
             <span>Instant Demo Explorer</span>
           </button>
+
+          {/* Admin RBAC Explorer */}
+          <button
+            onClick={() => signInDevAdmin()}
+            disabled={loading}
+            className="w-full sm:w-auto flex items-center justify-center gap-2 px-5 py-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/40 text-rose-700 dark:text-rose-300 font-medium text-sm border border-rose-300 dark:border-rose-800 transition-colors"
+          >
+            <ShieldCheck className="h-4 w-4 text-rose-500" />
+            <span>Admin RBAC Demo</span>
+          </button>
         </div>
+
 
         <p className="text-xs text-slate-500 dark:text-slate-400">
           No credit card required. Private Firestore encryption. Zero prompt training on personal entries.

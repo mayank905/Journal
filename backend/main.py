@@ -61,6 +61,7 @@ async def get_client_config():
 from backend.routes.entries import router as entries_router
 from backend.routes.agent import router as agent_router
 from backend.routes.maps import router as maps_router
+from backend.routes.admin import router as admin_router
 
 # 5. Authenticated User Profile Endpoint
 @app.get("/api/auth/me")
@@ -78,6 +79,10 @@ app.include_router(agent_router)
 
 # 8. Geo-Spatial Maps Router (Zero Secret Exposure & Coordinate Boundaries)
 app.include_router(maps_router)
+
+# 9. Admin Dashboard & RBAC Router (Role Verification & Immutable Audit Logs)
+app.include_router(admin_router)
+
 
 
 

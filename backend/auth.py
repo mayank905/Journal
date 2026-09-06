@@ -1,7 +1,8 @@
-﻿import logging
+import logging
 from typing import Optional
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, status, Depends
 import firebase_admin
+
 from firebase_admin import auth, credentials
 from backend.config import settings
 
@@ -31,11 +32,23 @@ def init_firebase():
         logger.warning(f"Firebase Admin initialization warning: {e}. Resilient dev mode active.")
 
 class AuthenticatedUser:
-    def __init__(self, uid: str, email: Optional[str] = None, name: Optional[str] = None, picture: Optional[str] = None):
+    def __init__(
+        self, 
+        uid: str, 
+        email: Optional[str] = None, 
+        name: Optional[str] = None, 
+        picture: Optional[str] = None,
+        role: str = "user",
+        is_admin: bool = False,
+        claims: Optional[dict] = None
+    ):
         self.uid = uid
         self.email = email or ""
         self.name = name or (email.split("@")[0] if email else "Journaler")
         self.picture = picture or ""
+        self.role = role
+        self.is_admin = is_admin
+        self.claims = claims or {}
 
     def to_dict(self):
         return {
@@ -43,6 +56,9 @@ class AuthenticatedUser:
             "email": self.email,
             "name": self.name,
             "picture": self.picture,
+            "role": self.role,
+            "is_admin": self.is_admin,
+            "claims": self.claims,
         }
 
 async def get_current_user(authorization: Optional[str] = Header(None)) -> AuthenticatedUser:
@@ -50,6 +66,7 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Authe
     Validates Firebase ID token in the Authorization header.
     Format: Bearer <firebase_id_token>
     Enforces that every authenticated request has a valid UID.
+    Extracts custom claims (admin, role) for multi-layered RBAC.
     """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
@@ -69,11 +86,16 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Authe
     # Resilient Development Mode: Allow verified development mock tokens
     if settings.ENVIRONMENT == "development" and token.startswith("dev-mock-token-"):
         uid = token.replace("dev-mock-token-", "").strip() or "dev-test-user-01"
+        is_admin = bool("admin" in uid.lower() or token.endswith("-admin") or uid in ["admin-root", "dev-explorer"])
+        role = "super_admin" if "root" in uid else ("admin" if is_admin else "user")
         return AuthenticatedUser(
             uid=uid,
             email=f"{uid}@example.com",
             name=f"Dev User ({uid})",
             picture="https://api.dicebear.com/7.x/bottts/svg?seed=" + uid,
+            role=role,
+            is_admin=is_admin,
+            claims={"admin": is_admin, "role": role},
         )
 
     init_firebase()
@@ -86,11 +108,16 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Authe
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Token missing uid claim.",
             )
+        is_admin = bool(decoded_token.get("admin") is True or decoded_token.get("role") in ["admin", "super_admin"])
+        role = decoded_token.get("role") or ("admin" if is_admin else "user")
         return AuthenticatedUser(
             uid=uid,
             email=decoded_token.get("email"),
             name=decoded_token.get("name"),
             picture=decoded_token.get("picture"),
+            role=role,
+            is_admin=is_admin,
+            claims=decoded_token,
         )
     except Exception as e:
         logger.error(f"Failed to verify Firebase ID token: {e}")
@@ -99,3 +126,17 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Authe
             detail=f"Invalid or expired authentication token: {str(e)}",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+async def require_admin(user: AuthenticatedUser = Depends(get_current_user)) -> AuthenticatedUser:
+    """
+    Dependency guard enforcing Role-Based Access Control (RBAC).
+    Rejects non-administrative users with 403 Forbidden.
+    """
+    if not user.is_admin:
+        logger.warning(f"Access denied for user {user.uid}: elevated admin permissions required.")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Elevated administrative privileges required.",
+        )
+    return user
+

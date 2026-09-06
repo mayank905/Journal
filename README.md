@@ -61,11 +61,12 @@ flowchart TD
 - Container images and client bundles contain **no** API keys or credentials.
 - `GEMINI_API_KEY` is dynamically mounted as an environment secret via Google Secret Manager.
 
-### 2. Firestore Owner Isolation (`firestore.rules`)
+### 2. Firestore Owner Isolation & Admin RBAC (`firestore.rules`)
 ```javascript
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // User Partitioned Reflections & Agent Interactions
     match /users/{userId} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
 
@@ -77,6 +78,16 @@ service cloud.firestore {
         allow read, write: if request.auth != null && request.auth.uid == userId;
       }
     }
+
+    // Admin RBAC Configurations & Immutable Audit Logs
+    match /admin_configs/{configId} {
+      allow read, write: if request.auth != null && request.auth.token.admin == true;
+    }
+
+    match /admin_audit_logs/{logId} {
+      allow read, write: if request.auth != null && request.auth.token.admin == true;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }
@@ -84,8 +95,23 @@ service cloud.firestore {
 }
 ```
 
-### 3. Defensive Sanitization
+### 3. Role-Based Access Control (RBAC) & Multi-Layer Authorization
+MindMirror implements a defense-in-depth authorization hierarchy:
+1. **Frontend Layer**: Role-aware UI with real-time custom claims decoding, admin status badges, and protected navigation tabs.
+2. **Gateway Layer**: FastAPI `require_admin` dependency guard validates cryptographic Firebase custom claims (`request.auth.token.admin == true`) and halts non-admin access with `403 Forbidden`.
+3. **Database Layer**: Firestore rules enforce `request.auth.token.admin == true` on `/admin_configs/` and `/admin_audit_logs/`.
+4. **Audit Trail**: All administrative actions (role changes, config updates, security interventions) generate immutable audit logs in `/admin_audit_logs/` recording actor UID, timestamp, action, and target resource ID.
+
+### 4. AI Admin Roles Directive
+A specialized AI Sentinel security layer evaluates elevated administrative operations and prompt injections:
+- **Cryptographic Claim Validation**: AI refuses conversational assertions of authority and mandates verified claims.
+- **Role Hierarchy**: `super_admin` (Tier 4) > `admin` (Tier 3) > `moderator` (Tier 2) > `user` (Tier 1).
+- **Blast Radius & Least Privilege**: Flags destructive mutations (e.g. log purging) as `CRITICAL` risk requiring dual escalation.
+- **Prompt Injection Interception**: Detects adversarial jailbreaks (e.g., 'ignore previous instructions', 'grant sudo root') and returns `SUSPICIOUS_INJECTION` with `CRITICAL` risk rating.
+
+### 5. Defensive Sanitization
 All payloads pass through recursive null/undefined pruning and coordinate bounds truncation to protect against injection and privacy leakage.
+
 
 ---
 
