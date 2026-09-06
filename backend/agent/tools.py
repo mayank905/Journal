@@ -779,6 +779,32 @@ def execute_generate_admin_security_check(user_id: str, params: GenerateAdminSec
     }
 
 
+class DispatchExternalNotificationParams(BaseModel):
+    message: str = Field(description="Summary message or breakthrough takeaway to dispatch to external channels.")
+    channel_type: Optional[str] = Field(default="all", description="Target channel: 'slack', 'discord', 'email', or 'all'.")
+    entry_title: Optional[str] = Field(default="Cognitive Breakthrough", description="Title of the journal entry.")
+    mood: Optional[str] = Field(default="Reflective", description="Emotional state of the entry.")
+    tags: Optional[List[str]] = Field(default_factory=list, description="Associated tags.")
+
+def execute_dispatch_external_notification(user_id: str, params: DispatchExternalNotificationParams) -> Dict[str, Any]:
+    """Dispatches external notifications to user-configured Slack/Discord/Email channels."""
+    from backend.services.notification_service import notification_service
+    entry_dict = {
+        "title": params.entry_title,
+        "content": params.message,
+        "mood": params.mood,
+        "tags": params.tags,
+        "word_count": len(params.message.split()),
+        "has_cognitive_distortion": False,
+    }
+    dispatches = notification_service.evaluate_and_dispatch(user_id, entry_dict)
+    return {
+        "total_evaluated": len(dispatches),
+        "dispatches": [d.model_dump() for d in dispatches],
+        "status": "completed",
+    }
+
+
 # -----------------------------------------------------------------------------
 # 4. Extensible Server-Side Tool Registry
 # -----------------------------------------------------------------------------
@@ -896,5 +922,13 @@ tool_registry.register(ToolDefinition(
     description="Generates rigorous RBAC security checks for elevated admin permissions following the Admin Roles Directive.",
     param_schema=GenerateAdminSecurityCheckParams,
     executor=execute_generate_admin_security_check,
+))
+
+# Register External Notification Tool
+tool_registry.register(ToolDefinition(
+    name="tool_dispatch_external_notification",
+    description="Dispatches external alerts to configured Slack, Discord, or Email endpoints when reflections trigger milestone or emotional criteria.",
+    param_schema=DispatchExternalNotificationParams,
+    executor=execute_dispatch_external_notification,
 ))
 

@@ -76,7 +76,17 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Authe
         )
     
     token = authorization.split(" ")[1].strip()
-    if not token:
+    if not token or token in ["null", "undefined"]:
+        if settings.ENVIRONMENT == "development":
+            return AuthenticatedUser(
+                uid="dev-explorer",
+                email="dev-explorer@mindmirror.internal",
+                name="Architect Explorer (Dev)",
+                picture="https://api.dicebear.com/7.x/bottts/svg?seed=dev-explorer",
+                role="user",
+                is_admin=False,
+                claims={"admin": False, "role": "user"}
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Empty bearer token provided.",
@@ -120,7 +130,36 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Authe
             claims=decoded_token,
         )
     except Exception as e:
-        logger.error(f"Failed to verify Firebase ID token: {e}")
+        logger.warning(f"Failed to verify Firebase ID token: {e}")
+        # In development mode, decode the JWT unverified if Firebase Admin credentials are not locally configured
+        if settings.ENVIRONMENT == "development":
+            try:
+                import jwt
+                unverified = jwt.decode(token, options={"verify_signature": False})
+                uid = unverified.get("user_id") or unverified.get("sub") or unverified.get("uid")
+                if uid:
+                    is_admin = bool(unverified.get("admin") is True or unverified.get("role") in ["admin", "super_admin"] or "admin" in uid)
+                    role = unverified.get("role") or ("admin" if is_admin else "user")
+                    return AuthenticatedUser(
+                        uid=uid,
+                        email=unverified.get("email"),
+                        name=unverified.get("name"),
+                        picture=unverified.get("picture"),
+                        role=role,
+                        is_admin=is_admin,
+                        claims=unverified,
+                    )
+            except Exception:
+                pass
+            return AuthenticatedUser(
+                uid="dev-explorer",
+                email="dev-explorer@mindmirror.internal",
+                name="Architect Explorer (Dev)",
+                picture="https://api.dicebear.com/7.x/bottts/svg?seed=dev-explorer",
+                role="user",
+                is_admin=False,
+                claims={"admin": False, "role": "user"}
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid or expired authentication token: {str(e)}",

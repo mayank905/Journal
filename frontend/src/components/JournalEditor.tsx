@@ -16,11 +16,13 @@ import {
   BookOpen,
   Bot,
   MapPin,
-  Download
+  Download,
+  Bell
 } from 'lucide-react';
 
 import { AgentChat } from './AgentChat';
 import { LocationPickerModal } from './LocationPickerModal';
+import { NotificationSettingsModal } from './NotificationSettingsModal';
 import { downloadEntryAsMarkdown } from '../lib/exportMarkdown';
 import { useAuth } from '../context/AuthContext';
 import { 
@@ -95,6 +97,7 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({ initialEntry, onEn
   const [dialogueHistory, setDialogueHistory] = useState<EntryDialogueTurn[]>([]);
   const [synthesis, setSynthesis] = useState<EntrySynthesis | null>(null);
   const [locationModalOpen, setLocationModalOpen] = useState<boolean>(false);
+  const [notificationsModalOpen, setNotificationsModalOpen] = useState<boolean>(false);
 
   // Auto-Save control state
   const [autoSaveEnabled, setAutoSaveEnabled] = useState<boolean>(() => {
@@ -535,6 +538,16 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({ initialEntry, onEn
           >
             <Download className="h-4 w-4 text-slate-500" />
             <span className="hidden md:inline">Export .md</span>
+          </button>
+
+          {/* External Notifications & Alerts Button */}
+          <button
+            onClick={() => setNotificationsModalOpen(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium transition-all"
+            title="Configure External Notifications (Slack, Discord, Email)"
+          >
+            <Bell className="h-4 w-4 text-indigo-500" />
+            <span className="hidden sm:inline">Alerts</span>
           </button>
 
           {/* Favorite Star Toggle */}
@@ -986,6 +999,14 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({ initialEntry, onEn
       currentLocation={location}
       onSaveLocation={handleSaveLocation}
       onClose={() => setLocationModalOpen(false)}
+    />
+  )}
+
+  {/* Notification Settings Modal */}
+  {notificationsModalOpen && (
+    <NotificationSettingsModal
+      isOpen={notificationsModalOpen}
+      onClose={() => setNotificationsModalOpen(false)}
     />
   )}
 </div>

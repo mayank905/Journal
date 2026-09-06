@@ -62,6 +62,11 @@ class AdminService:
         self._init_firestore()
 
     def _init_firestore(self):
+        from backend.config import settings
+        if settings.ENVIRONMENT == "development" and not settings.FIREBASE_SERVICE_ACCOUNT_PATH:
+            logger.info("Dev environment active without explicit service account key. Using resilient in-memory store for AdminService.")
+            self._firestore_db = None
+            return
         try:
             from firebase_admin import firestore
             self._firestore_db = firestore.client()

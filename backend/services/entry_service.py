@@ -59,6 +59,11 @@ class EntryService:
         self._init_firestore()
 
     def _init_firestore(self):
+        from backend.config import settings
+        if settings.ENVIRONMENT == "development" and not settings.FIREBASE_SERVICE_ACCOUNT_PATH:
+            logger.info("Dev environment active without explicit service account key. Using resilient in-memory store for EntryService.")
+            self._firestore_db = None
+            return
         try:
             from firebase_admin import firestore
             self._firestore_db = firestore.client()
@@ -114,6 +119,13 @@ class EntryService:
         if user_id not in _dev_memory_store:
             _dev_memory_store[user_id] = {}
         _dev_memory_store[user_id][entry_id] = sanitized_doc
+
+        # Safely evaluate external notifications (Slack, Discord, Email) without blocking persistence
+        try:
+            from backend.services.notification_service import notification_service
+            notification_service.evaluate_and_dispatch(user_id, sanitized_doc)
+        except Exception as notif_err:
+            logger.debug(f"External notification evaluation note: {notif_err}")
 
         return response_obj
 
