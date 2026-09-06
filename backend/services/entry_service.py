@@ -7,6 +7,8 @@ from backend.schemas.entry import (
     JournalEntryCreate,
     JournalEntryUpdate,
     JournalEntryResponse,
+    FlashbackEntryItem,
+    FlashbackResponse,
     recursive_sanitize,
 )
 from backend.config import settings
@@ -233,4 +235,100 @@ class EntryService:
 
         return deleted
 
+    def get_flashbacks(self, user_id: str, target_date_str: Optional[str] = None) -> FlashbackResponse:
+        """
+        Longitudinal Flashback Engine ('On This Day' Temporal Recall).
+        Matches reflections written on the same calendar month and day in strictly prior years.
+        Handles leap-year Feb 29 conversions and returns entries sorted by years_ago ascending.
+        """
+        now_utc = datetime.now(timezone.utc)
+        target_year = now_utc.year
+        target_month = now_utc.month
+        target_day = now_utc.day
+
+        if target_date_str:
+            clean_date = target_date_str.strip()
+            # If formatted YYYY-MM-DD
+            if len(clean_date) == 10 and clean_date[4] == '-' and clean_date[7] == '-':
+                try:
+                    parsed = datetime.strptime(clean_date, "%Y-%m-%d")
+                    target_year = parsed.year
+                    target_month = parsed.month
+                    target_day = parsed.day
+                except ValueError:
+                    pass
+            # If formatted MM-DD
+            elif len(clean_date) == 5 and clean_date[2] == '-':
+                try:
+                    parsed = datetime.strptime(clean_date, "%m-%d")
+                    target_month = parsed.month
+                    target_day = parsed.day
+                except ValueError:
+                    pass
+
+        is_leap_day = (target_month == 2 and target_day == 29)
+        month_day_key = f"{target_month:02d}-{target_day:02d}"
+        iso_target = f"{target_year:04d}-{target_month:02d}-{target_day:02d}"
+
+        entries = self.list_entries(user_id)
+        flashback_items: List[FlashbackEntryItem] = []
+
+        for entry in entries:
+            created_at_str = entry.created_at
+            if not created_at_str:
+                continue
+            try:
+                entry_date_part = created_at_str[:10]
+                entry_dt = datetime.strptime(entry_date_part, "%Y-%m-%d")
+            except Exception:
+                continue
+
+            entry_year = entry_dt.year
+            # Directive: Must be strictly prior calendar year (year < target_year)
+            if entry_year >= target_year:
+                continue
+
+            # Check if month and day match
+            matches = False
+            if entry_dt.month == target_month and entry_dt.day == target_day:
+                matches = True
+            elif is_leap_day and not ((entry_year % 4 == 0 and entry_year % 100 != 0) or (entry_year % 400 == 0)):
+                # If target is Feb 29, but entry is in a non-leap year, match Feb 28
+                if entry_dt.month == 2 and entry_dt.day == 28:
+                    matches = True
+            elif target_month == 2 and target_day == 28 and not ((target_year % 4 == 0 and target_year % 100 != 0) or (target_year % 400 == 0)):
+                # If target is Feb 28 on a non-leap year, also include past Feb 29 leap year reflections
+                if entry_dt.month == 2 and entry_dt.day == 29:
+                    matches = True
+
+            if matches:
+                years_ago = target_year - entry_year
+                anniversary_text = f"{years_ago} year{'s' if years_ago > 1 else ''} ago today"
+                flashback_items.append(
+                    FlashbackEntryItem(
+                        entry=entry,
+                        years_ago=years_ago,
+                        formatted_anniversary=anniversary_text,
+                    )
+                )
+
+        flashback_items.sort(key=lambda x: x.years_ago)
+
+        prompt = None
+        if flashback_items:
+            first_item = flashback_items[0]
+            prompt = (
+                f"On this day {first_item.formatted_anniversary}, you felt '{first_item.entry.mood}' "
+                f"and wrote '{first_item.entry.title or 'Untitled Reflection'}'. "
+                "How has your perspective or personal growth evolved since then?"
+            )
+
+        return FlashbackResponse(
+            target_date=iso_target,
+            month_day=month_day_key,
+            flashbacks=flashback_items,
+            prompt=prompt,
+        )
+
 entry_service = EntryService()
+

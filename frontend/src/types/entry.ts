@@ -135,3 +135,16 @@ export interface JournalEntry {
 
 export type SaveStatus = 'saved' | 'saving' | 'unsaved' | 'error';
 
+export interface FlashbackEntryItem {
+  entry: JournalEntry;
+  yearsAgo: number;
+  formattedAnniversary: string;
+}
+
+export interface FlashbackResponse {
+  targetDate: string;
+  monthDay: string;
+  flashbacks: FlashbackEntryItem[];
+  prompt?: string | null;
+}
+

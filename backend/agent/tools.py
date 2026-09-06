@@ -206,6 +206,16 @@ def execute_search_journal_memory(user_id: str, params: SearchJournalMemoryParam
         if len(query_tokens) > 0 and raw_query.strip().lower() in entry_content_lower:
             score += 5
 
+        # Temporal anniversary boost if query involves flashbacks or "on this day"
+        if any(w in query_lower for w in ["flashback", "on this day", "last year", "anniversary", "years ago"]):
+            try:
+                if raw_created:
+                    e_dt = datetime.fromisoformat(str(raw_created).replace("Z", "+00:00"))
+                    if e_dt.month == now.month and e_dt.day == now.day and e_dt.year < now.year:
+                        score += 8
+            except Exception:
+                pass
+
         # Emotional mood correlation
         if params.mood and entry.mood and entry.mood.lower() == params.mood.lower():
             score += 4

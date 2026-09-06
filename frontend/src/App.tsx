@@ -6,6 +6,7 @@ import { JournalEditor } from "./components/JournalEditor";
 import { HistoryArchive } from "./components/HistoryArchive";
 import { InsightsDashboard } from "./components/InsightsDashboard";
 import { AdminDashboard } from "./components/AdminDashboard";
+import { FlashbackBanner } from "./components/FlashbackBanner";
 import { Shield, CheckCircle2 } from "lucide-react";
 import { subscribeToUserEntries } from "./lib/entriesApi";
 import type { JournalEntry } from "./types/entry";
@@ -52,6 +53,13 @@ const MainContent: React.FC<{ darkMode: boolean; setDarkMode: React.Dispatch<Rea
     setActiveFilterTag(tag);
     setActiveTab('history');
   };
+
+  // Compare flashback entry with AI in editor
+  const handleAskAgentToCompare = (entry: JournalEntry) => {
+    setSelectedEntryForEditor(entry);
+    setActiveTab('editor');
+  };
+
 
   if (loading) {
     return (
@@ -117,6 +125,12 @@ const MainContent: React.FC<{ darkMode: boolean; setDarkMode: React.Dispatch<Rea
               <div className="absolute -right-16 -top-16 w-80 h-80 rounded-full bg-indigo-500/20 blur-3xl pointer-events-none" />
               <div className="absolute right-10 -bottom-10 w-60 h-60 rounded-full bg-sky-500/20 blur-3xl pointer-events-none" />
             </div>
+
+            {/* Longitudinal Flashback Banner ("On This Day" Memory Recall) */}
+            <FlashbackBanner 
+              onOpenEntry={handleOpenEntryInEditor}
+              onAskAgentToCompare={handleAskAgentToCompare}
+            />
 
             {/* Active Tab View */}
             <div className="pt-2">

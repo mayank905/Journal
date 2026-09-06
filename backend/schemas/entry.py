@@ -137,3 +137,15 @@ class JournalEntryResponse(JournalEntryBase):
     def to_sanitized_firestore_dict(self) -> Dict[str, Any]:
         raw_dict = self.model_dump()
         return recursive_sanitize(raw_dict)
+
+class FlashbackEntryItem(BaseModel):
+    entry: JournalEntryResponse
+    years_ago: int
+    formatted_anniversary: str
+
+class FlashbackResponse(BaseModel):
+    target_date: str
+    month_day: str
+    flashbacks: List[FlashbackEntryItem] = Field(default_factory=list)
+    prompt: Optional[str] = None
+

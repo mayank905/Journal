@@ -56,6 +56,7 @@ export const HistoryArchive: React.FC<HistoryArchiveProps> = ({
   const [selectedTag, setSelectedTag] = useState<string | null>(initialFilterTag || null);
   const [starredOnly, setStarredOnly] = useState<boolean>(false);
   const [withLocationOnly, setWithLocationOnly] = useState<boolean>(false);
+  const [onThisDayOnly, setOnThisDayOnly] = useState<boolean>(false);
 
   // View state: 'grid' or 'map'
   const [viewMode, setViewMode] = useState<'grid' | 'map'>('grid');
@@ -157,9 +158,27 @@ export const HistoryArchive: React.FC<HistoryArchiveProps> = ({
         return false;
       }
 
+      // 6. On This Day Flashback Filter
+      if (onThisDayOnly) {
+        if (!entry.createdAt) return false;
+        try {
+          const entryDate = new Date(entry.createdAt);
+          const today = new Date();
+          const sameMonth = entryDate.getMonth() === today.getMonth();
+          const sameDay = entryDate.getDate() === today.getDate();
+          const priorYear = entryDate.getFullYear() < today.getFullYear();
+          if (!sameMonth || !sameDay || !priorYear) {
+            return false;
+          }
+        } catch {
+          return false;
+        }
+      }
+
       return true;
     });
-  }, [entries, searchQuery, selectedMood, selectedTag, starredOnly, withLocationOnly]);
+  }, [entries, searchQuery, selectedMood, selectedTag, starredOnly, withLocationOnly, onThisDayOnly]);
+
 
 interface GeotaggedEntry extends JournalEntry {
   location: NonNullable<JournalEntry['location']> & { lat: number; lng: number };
@@ -207,7 +226,7 @@ interface GeotaggedEntry extends JournalEntry {
     }
   };
 
-  const hasActiveFilters = searchQuery || selectedMood !== 'All' || selectedTag || starredOnly || withLocationOnly;
+  const hasActiveFilters = searchQuery || selectedMood !== 'All' || selectedTag || starredOnly || withLocationOnly || onThisDayOnly;
 
   const handleResetFilters = () => {
     setSearchQuery('');
@@ -215,8 +234,10 @@ interface GeotaggedEntry extends JournalEntry {
     setSelectedTag(null);
     setStarredOnly(false);
     setWithLocationOnly(false);
+    setOnThisDayOnly(false);
     if (onClearInitialTag) onClearInitialTag();
   };
+
 
   // Calculate default center for Map Atlas
   const mapCenter = useMemo(() => {
@@ -353,6 +374,20 @@ interface GeotaggedEntry extends JournalEntry {
             <MapPin className="h-3 w-3" />
             <span>With Location</span>
           </button>
+
+          {/* On This Day Flashback Toggle */}
+          <button
+            onClick={() => setOnThisDayOnly(prev => !prev)}
+            className={`px-2.5 py-1 rounded-lg text-xs font-medium border flex items-center gap-1 transition-colors ${
+              onThisDayOnly
+                ? 'bg-amber-600 text-white border-amber-600'
+                : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-100'
+            }`}
+          >
+            <Sparkles className="h-3 w-3" />
+            <span>On This Day</span>
+          </button>
+
 
           {/* Tag Filter Dropdown or Active Tag Pill */}
           {selectedTag && (

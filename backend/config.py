@@ -1,5 +1,8 @@
-﻿import os
-from pydantic_settings import BaseSettings
+import os
+try:
+    from pydantic_settings import BaseSettings
+except ImportError:
+    from pydantic import BaseModel as BaseSettings
 from typing import Optional
 from dotenv import load_dotenv
 

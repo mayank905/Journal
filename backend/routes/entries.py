@@ -1,5 +1,5 @@
 import logging
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from backend.auth import get_current_user, AuthenticatedUser
@@ -7,6 +7,7 @@ from backend.schemas.entry import (
     JournalEntryCreate,
     JournalEntryUpdate,
     JournalEntryResponse,
+    FlashbackResponse,
     recursive_sanitize,
 )
 from backend.services.entry_service import entry_service
@@ -34,6 +35,17 @@ async def create_or_upsert_entry(
     """
     sanitized_entry = entry_service.upsert_entry(user.uid, entry_in)
     return sanitized_entry
+
+@router.get("/on-this-day", response_model=FlashbackResponse)
+async def get_on_this_day_flashbacks(
+    target_date: Optional[str] = None,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    Retrieve historical reflections created on the same month and day in strictly prior years.
+    Guarantees multi-tenant user isolation under /users/{userId}/entries.
+    """
+    return entry_service.get_flashbacks(user.uid, target_date)
 
 @router.get("/{entry_id}", response_model=JournalEntryResponse)
 async def get_single_entry(

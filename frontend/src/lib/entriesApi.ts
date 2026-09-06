@@ -1,7 +1,7 @@
 import { doc, setDoc, getDocs, collection, deleteDoc, query, orderBy, onSnapshot } from 'firebase/firestore';
 import { db } from './firebase';
 import { sanitizeFirestorePayload } from './sanitizer';
-import type { JournalEntry } from '../types/entry';
+import type { JournalEntry, FlashbackResponse } from '../types/entry';
 
 function getAuthHeader(token: string | null): Record<string, string> {
   const headers: Record<string, string> = {
@@ -265,3 +265,65 @@ export function subscribeToUserEntries(
     return () => {};
   }
 }
+
+export async function fetchOnThisDayFlashbacks(
+  token: string | null,
+  targetDate?: string
+): Promise<FlashbackResponse> {
+  const url = targetDate 
+    ? `/api/entries/on-this-day?target_date=${encodeURIComponent(targetDate)}`
+    : '/api/entries/on-this-day';
+
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: getAuthHeader(token),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      return {
+        targetDate: data.target_date,
+        monthDay: data.month_day,
+        flashbacks: (data.flashbacks || []).map((f: any) => {
+          const item = f.entry || {};
+          return {
+            entry: {
+              id: item.id,
+              userId: item.user_id || item.userId,
+              title: item.title || 'Untitled Reflection',
+              content: item.content || '',
+              mood: item.mood || 'Reflective',
+              tags: item.tags || [],
+              isFavorite: item.is_favorite ?? item.isFavorite ?? false,
+              wordCount: item.word_count ?? item.wordCount ?? 0,
+              charCount: item.char_count ?? item.charCount ?? 0,
+              location: item.location || null,
+              dialogueHistory: item.dialogue_history || item.dialogueHistory || [],
+              synthesis: item.synthesis || null,
+              createdAt: item.created_at || item.createdAt || new Date().toISOString(),
+              updatedAt: item.updated_at || item.updatedAt || new Date().toISOString(),
+            } as JournalEntry,
+            yearsAgo: f.years_ago,
+            formattedAnniversary: f.formatted_anniversary,
+          };
+        }),
+        prompt: data.prompt || null,
+      };
+    }
+  } catch (err) {
+    console.warn('Error fetching on-this-day flashbacks from backend:', err);
+  }
+
+  // Graceful zero-state fallback
+  const now = new Date();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  return {
+    targetDate: now.toISOString().split('T')[0],
+    monthDay: `${mm}-${dd}`,
+    flashbacks: [],
+    prompt: null,
+  };
+}
+

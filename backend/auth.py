@@ -1,9 +1,14 @@
 import logging
 from typing import Optional
 from fastapi import Header, HTTPException, status, Depends
-import firebase_admin
+try:
+    import firebase_admin
+    from firebase_admin import auth, credentials
+except ImportError:
+    firebase_admin = None
+    auth = None
+    credentials = None
 
-from firebase_admin import auth, credentials
 from backend.config import settings
 
 logger = logging.getLogger("mindmirror.auth")
@@ -13,8 +18,9 @@ _firebase_initialized = False
 
 def init_firebase():
     global _firebase_initialized
-    if _firebase_initialized:
+    if _firebase_initialized or not firebase_admin:
         return
+
     try:
         if settings.FIREBASE_SERVICE_ACCOUNT_PATH:
             cred = credentials.Certificate(settings.FIREBASE_SERVICE_ACCOUNT_PATH)
