@@ -1,0 +1,11 @@
+{
+  "name": "mindmirror",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MindMirror — Agentic Journaling & Reflective Cognition Workspace",
+  "scripts": {
+    "dev:backend": "powershell -Command \".\\.venv\\Scripts\\python.exe -m uvicorn backend.main:app --reload --port 8000\"",
+    "dev:frontend": "npm.cmd --prefix frontend run dev",
+    "build:frontend": "npm.cmd --prefix frontend run build"
+  }
+}

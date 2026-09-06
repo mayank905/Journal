@@ -1,0 +1,26 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // MindMirror User-Partitioned Security Model
+    // All private journal reflections, AI dialogues, cognitive memories, and milestones
+    // are strictly bounded to the authenticated owner's UID.
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+
+      // Journal Entries Sub-Collection
+      match /entries/{entryId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      // ReAct Agent Interactions & Session Memory Sub-Collection
+      match /interactions/{interactionId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+
+    // Default deny for all other collections to prevent unauthorized access
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
